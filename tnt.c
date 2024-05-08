@@ -19,55 +19,76 @@
 #define D(...) LOG('D', __VA_ARGS__)
 #define E(...) LOG('E', __VA_ARGS__)
 
-#define ROTL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+typedef int32_t i32;
+typedef uint32_t u32;
+#define ROTL(value, bits) (((value) << (bits)) | ((value) >> (32 - (bits))))
 
-void sha1(char *vals, size_t len, char out[20]) {
-    uint32_t a = 0x67452301;
-    uint32_t b = 0xEFCDAB89;
-    uint32_t c = 0x98BADCFE;
-    uint32_t d = 0x10325476;
-    uint32_t e = 0xC3D2E1F0;
-    uint32_t tmp, f, k, w[80];
-    for (size_t i = 0; i < len+9; i += 64) {
-        for (size_t t = 0; t < 16; t++) {
-            if (i + t < len)
-                w[t] = vals[i+t] & 0xFF;
-            else if (i + t == len)
-                w[t] = 0x80;
-            else
-                w[t] = 0;
+int sha1(unsigned char *data, size_t len, unsigned char digest[20]) {
+    u32 w[80];
+    u32 h[] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
+    u32 a, b, c, d, e, f = 0, k = 0;
+    i32 wcount;
+    u32 idx, lidx, widx, didx = 0, tmp;
+    u32 loopcount = (len + 8) / 64 + 1;
+    u32 tailbytes = 64 * loopcount - len;
+    unsigned char datatail[128] = {0};
+    datatail[0] = 0x80;
+    datatail[tailbytes-8] = len*8 >> 56 & 0xFF;
+    datatail[tailbytes-7] = len*8 >> 48 & 0xFF;
+    datatail[tailbytes-6] = len*8 >> 40 & 0xFF;
+    datatail[tailbytes-5] = len*8 >> 32 & 0xFF;
+    datatail[tailbytes-4] = len*8 >> 24 & 0xFF;
+    datatail[tailbytes-3] = len*8 >> 16 & 0xFF;
+    datatail[tailbytes-2] = len*8 >> 8  & 0xFF;
+    datatail[tailbytes-1] = len*8 >> 0  & 0xFF;
+    for (lidx = 0; lidx < loopcount; lidx++) {
+        memset (w, 0, 80*sizeof(u32));
+        for (widx = 0; widx <= 15; widx++) {
+            wcount = 24;
+            while (didx < len && wcount >= 0) {
+                w[widx] += (((u32)data[didx]) << wcount);
+                didx++;
+                wcount -= 8;
+            }
+            while (wcount >= 0) {
+                w[widx] += (((u32)datatail[didx - len]) << wcount);
+                didx++;
+                wcount -= 8;
+            }
         }
-        for (size_t t = 16; t < 80; t++)
-            w[t] = ROTL(w[t-3] ^ w[t-8] ^ w[t-14] ^ w[t-16], 1);
-        uint32_t h[5] = {a, b, c, d, e};
-        for (size_t t = 0; t < 80; t++) {
-            if (t < 20) {
+        for (widx = 16; widx <= 31; widx++)
+            w[widx] = ROTL((w[widx-3] ^ w[widx-8] ^ w[widx-14] ^ w[widx-16]), 1);
+        for (widx = 32; widx <= 79; widx++)
+            w[widx] = ROTL((w[widx-6] ^ w[widx-16] ^ w[widx-28] ^ w[widx-32]), 2);
+        a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4];
+        for (idx = 0; idx <= 79; idx++) {
+            if (idx <= 19) {
                 f = (b & c) | ((~b) & d);
                 k = 0x5A827999;
-            } else if (t < 40) {
+            } else if (idx >= 20 && idx <= 39) {
                 f = b ^ c ^ d;
                 k = 0x6ED9EBA1;
-            } else if (t < 60) {
+            } else if (idx >= 40 && idx <= 59) {
                 f = (b & c) | (b & d) | (c & d);
                 k = 0x8F1BBCDC;
-            } else {
+            } else if (idx >= 60 && idx <= 79) {
                 f = b ^ c ^ d;
                 k = 0xCA62C1D6;
             }
-            tmp = ROTL(a, 5) + f + e + k + w[t];
+            tmp = ROTL(a, 5) + f + e + k + w[idx];
             e = d;
             d = c;
             c = ROTL(b, 30);
             b = a;
             a = tmp;
         }
-        uint32_t hash[20/4];
-        hash[0] += a;
-        hash[1] += b;
-        hash[2] += c;
-        hash[3] += d;
-        hash[4] += e;
-        memcpy(out, hash, 20);
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    }
+    for (idx = 0; idx < 5; idx++) {
+        digest[idx*4+0] = h[idx] >> 24;
+        digest[idx*4+1] = h[idx] >> 16;
+        digest[idx*4+2] = h[idx] >> 8;
+        digest[idx*4+3] = h[idx];
     }
 }
 
@@ -342,8 +363,10 @@ int gen_infohash(dict *info) {
     if (!buf) return ERR;
     r = encode(buf, &n);
     if (r) return r;
+    char hex[41];
     char h[20];
     sha1(buf->vals, buf->len, h);
+    D("%d", h[0]);
     free(buf);
     return OK;
 }
