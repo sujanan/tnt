@@ -582,6 +582,17 @@ int t_conn(struct addrinfo *info, event_cb *cb) {
     return r;
 }
 
+int readbin(char *name, bytes *buf) {
+    FILE *f = fopen(name, "rb");
+    if (!f) return ERR;
+    size_t r = fread(buf->vals, 1, buf->cap, f);
+    if (ferror(f)) return ERR;
+    if (!feof(f)) return ERR;
+    buf->len = r;
+    fclose(f);
+    return OK;
+}
+
 int gen_infohash(dict *info, unsigned char h[20]) {
     int r;
     node n = {.v.d = info, .t = DICT};
@@ -594,16 +605,41 @@ int gen_infohash(dict *info, unsigned char h[20]) {
     return OK;
 }
 
-int readbin(char *name, bytes *buf) {
-    FILE *f = fopen(name, "rb");
-    if (!f) return ERR;
-    size_t r = fread(buf->vals, 1, buf->cap, f);
-    if (ferror(f)) return ERR;
-    if (!feof(f)) return ERR;
-    buf->len = r;
-    fclose(f);
-    return OK;
+typedef struct file {
+    char *name;
+    int len;
+} file;
+
+typedef struct peer {
+    char id[20];
+    char ip[40];
+    char port[6];
+} peer;
+
+typedef struct piece {
+    int i;
+    int hash;
+    int len;
+    bytes *buf;
+    int downloaded;
+    int requested;
+} piece;
+
+typedef struct tnt {
+    dict *metainfo;
+    int left;
+    int uploaded;
+    int downloaded;
+    char *announce;
+    int piecelen;
+    piece *pieces;
+    char *hashes[20];
+    file files[128];
+} tnt;
+
+void discov_peers(struct addrinfo *info, tnt *t) {
 }
+
 
 int main(int argc, char **argv) {
     if (argc != 2) {
