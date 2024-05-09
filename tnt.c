@@ -3,6 +3,13 @@
 #include <string.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <sys/select.h>
+#include <netdb.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #define OK 0
 #define ERR 1
@@ -23,7 +30,7 @@ typedef int32_t i32;
 typedef uint32_t u32;
 #define ROTL(value, bits) (((value) << (bits)) | ((value) >> (32 - (bits))))
 
-int sha1(unsigned char *data, size_t len, unsigned char digest[20]) {
+void sha1(unsigned char *data, size_t len, unsigned char digest[20]) {
     u32 w[80];
     u32 h[] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
     u32 a, b, c, d, e, f = 0, k = 0;
@@ -136,6 +143,7 @@ typedef struct dict {
 
 typedef struct bytes {
     char *vals;
+    char *r;
     int len;
     int cap;
 } bytes;
@@ -201,10 +209,16 @@ bytes *bytes_create(int cap) {
     if (!b) return NULL;
     b->vals = malloc(cap);
     if (!b->vals) return NULL;
+    b->r = b->vals;
     b->len = 0;
     b->cap = cap;
     memset(b->vals, 0, cap);
     return b;
+}
+
+void bytes_free(bytes *s) {
+    free(s->r);
+    free(s);
 }
 
 int encode(bytes *raw, node *n) {
@@ -251,7 +265,7 @@ int encode(bytes *raw, node *n) {
             /* We create a bytes type key from our key, so we can use our encode 
              * function to encode key strings like any other bytes. */
             char k[KEY_LEN];
-            bytes s = {.vals = k, s.cap = KEY_LEN};
+            bytes s = {.vals = k, .r = k, s.cap = KEY_LEN};
             strcpy(s.vals, e->k);
             s.len = strlen(e->k);
             node kn = {.v.s = &s, .t = BYTES};
@@ -356,17 +370,226 @@ int decode(bytes *raw, node *n, int *x) {
     return OK;
 }
 
-int gen_infohash(dict *info) {
+#define ELOOP_R 1<<0 /* reading */
+#define ELOOP_W 1<<1 /* writing */
+#define ELOOP_E 1<<2 /* expectional */
+
+typedef struct event event; 
+typedef struct eloop eloop; 
+
+typedef void event_cb(int r, event *e);
+
+typedef struct event {
+    int fd;  
+    int mask;
+    bytes *buf;
+    event *next;
+    event *prev;
+    event_cb *cb;
+    void *data;
+} event;
+
+typedef struct eloop {
+    event *head;
+    event *tail;
+} eloop;
+
+int eloop_add(eloop *l, int fd, int mask, event_cb *cb, bytes *buf, void *data) {
+    event *e = malloc(sizeof(event));
+    if (!e) return ERR;
+    memset(e, 0, sizeof(event));
+    e->fd = fd;
+    e->mask = mask;
+    e->cb = cb;
+    e->buf = buf;
+    e->data = data;
+
+    if (!l->head && !l->tail) {
+        l->head = e;
+        l->tail = e;
+    } else {
+        l->tail->next = e;
+        e->prev = l->tail;
+        l->tail = e;
+    }
+    return OK;
+}
+
+void eloop_rm(eloop *l, event *e) {
+    assert(l->head);
+    assert(l->tail);
+    if (e->prev) {
+        if (e == l->tail) l->tail = e->prev;
+        e->prev->next = e->next;
+    }
+    if (e->next) {
+        if (e == l->head) l->head = e->next;
+        e->next->prev = e->prev;
+    }
+    if (!e->prev && !e->next) {
+        assert(l->head == e);
+        assert(l->tail == e);
+        l->head = NULL;
+        l->tail = NULL;
+    }
+    free(e);
+}
+
+int eloop_proc(eloop *l) {
+    int r;
+    /* file descriptor sets to fill with select call */
+    fd_set rfds, wfds, efds;
+
+    /* initialize sets */
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_ZERO(&efds);
+
+    event *e = l->head;
+    int maxfd = 0;
+    /* add fd to sets and track maxfd */
+    while (e) {
+        if (e->fd & ELOOP_R) FD_SET(e->fd, &rfds);
+        if (e->fd & ELOOP_W) FD_SET(e->fd, &wfds);
+        if (e->fd & ELOOP_E) FD_SET(e->fd, &efds);
+        if (e->fd > maxfd) maxfd = e->fd;
+        e = e->next;
+    }
+
+    r = select(maxfd+1, &rfds, &wfds, &efds, NULL);
+    /* error occured */
+    if (r == -1) return ERR;
+    /* nothing to process */
+    if (r ==  0) return OK;
+    /* start from head */
+    e = l->head;
+    while (e) {
+        if (e->mask & ELOOP_R && FD_ISSET(e->fd, &rfds) ||
+            e->mask & ELOOP_W && FD_ISSET(e->fd, &wfds) ||
+            e->mask & ELOOP_E && FD_ISSET(e->fd, &efds))
+        {
+            /* execute registered callback */
+            e->cb(OK, e);
+            /* clear sets */
+            FD_CLR(e->fd, &rfds);
+            FD_CLR(e->fd, &wfds);
+            FD_CLR(e->fd, &efds);
+            eloop_rm(l, e);
+            /* start from the begining */
+            e = l->head;
+        } else {
+            e = e->next;
+        }     
+    }
+    return OK;
+}
+
+int eloop_run(eloop *l) {
+    int r;
+    /* util event loop is not empty, process */
+    while (l->head) {
+        r = eloop_proc(l);
+        if (r) return r;
+    }
+    return OK;
+}
+
+eloop L; 
+
+int resolve(struct addrinfo **info, char *host, char *port, int socktype) {
+    int r;
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = socktype;
+    return getaddrinfo(host, port, &hints, info);
+}
+
+void t_recv_rec(int r, event *e) {
+    event_cb *cb = e->data;
+    if (r) goto error;
+    ssize_t n = recv(e->fd, e->buf->vals, e->buf->cap, MSG_NOSIGNAL);
+    if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        r = eloop_add(&L, e->fd, e->mask, t_recv_rec, e->buf, e->data);
+        if (r) goto error;
+    } else if (n == -1) {
+        goto error;
+    } else if (n < e->buf->cap) {
+        e->buf->len += n;
+        t_recv_rec(r, e);
+    } else {
+        cb(r, e);
+    }
+    return;
+error:
+    cb(ERR, e);
+}
+
+void t_send_rec(int r, event *e) {
+    event_cb *cb = e->data;
+    if (r) goto error;
+    ssize_t n = send(e->fd, e->buf->vals, e->buf->len, MSG_NOSIGNAL);
+    if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        r = eloop_add(&L, e->fd, e->mask, t_send_rec, e->buf, e->data);
+        if (r) goto error;
+    } else if (n == -1) {
+        goto error;
+    } else if (n < e->buf->len) {
+        e->buf->vals += n;
+        e->buf->len -= n;
+        t_send_rec(r, e);
+    } else {
+        cb(r, e);
+    }
+    return;
+error:
+    cb(ERR, e);
+}
+
+void t_recv(int fd, bytes *buf, event_cb *cb) {
+    event e = {.fd = fd, .mask = ELOOP_R, .buf = buf, 
+        .cb = cb, .data = cb, .next = NULL, .prev = NULL};
+    t_recv_rec(OK, &e);
+}
+
+void t_send(int fd, bytes *buf, event_cb *cb) {
+    event e = {.fd = fd, .mask = ELOOP_W, .buf = buf, 
+        .cb = cb, .data = cb, .next = NULL, .prev = NULL};
+    t_send_rec(OK, &e);
+}
+
+int t_conn(struct addrinfo *info, event_cb *cb) {
+    int r = OK;
+    struct addrinfo *p = info;
+    for (; p; p = p->ai_next) {
+        int fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd == -1) continue;
+        r = fcntl(fd, F_SETFL, O_NONBLOCK);
+        if (r == -1) {
+            close(fd);
+            continue;
+        }
+        r = connect(fd, p->ai_addr, p->ai_addrlen);
+        if (r == -1 && errno != EINPROGRESS) {
+            close(fd);
+            continue;
+        }
+        r = eloop_add(&L, fd, ELOOP_W, cb, NULL, NULL);
+        if (r) close(fd);
+        break;
+    }
+    freeaddrinfo(info);
+    return r;
+}
+
+int gen_infohash(dict *info, unsigned char h[20]) {
     int r;
     node n = {.v.d = info, .t = DICT};
     bytes *buf = bytes_create(2*1024*1024);
     if (!buf) return ERR;
     r = encode(buf, &n);
     if (r) return r;
-    char hex[41];
-    char h[20];
-    sha1(buf->vals, buf->len, h);
-    D("%d", h[0]);
+    sha1((unsigned char *) buf->vals, buf->len, h);
     free(buf);
     return OK;
 }
@@ -405,6 +628,7 @@ int main(int argc, char **argv) {
         assert(buf->vals[i] == fub->vals[i]);
     node *info = dict_get(n.v.d, "info");
     assert(info != NULL);
-    gen_infohash(info->v.d);
+    unsigned char h[20];
+    gen_infohash(info->v.d, h);
     return 0;
 }
