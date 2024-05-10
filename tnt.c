@@ -16,7 +16,7 @@
 
 #define LOG(lvl, ...)                                             \
     do {                                                          \
-        printf("%c:%3d| ", lvl, __LINE__);                        \
+        printf("%c:%4d| ", lvl, __LINE__);                        \
         printf(__VA_ARGS__);                                      \
         if (lvl == 'E' && errno) printf(": %s", strerror(errno)); \
         printf("\n");                                             \
@@ -226,6 +226,7 @@ void dict_free(dict *d);
 void bytes_free(bytes *s);
 
 void list_free(list *l) {
+    if (!l) return;
     node *n;
     for (int i = 0; i < l->len; i++) {
         n = &l->vals[i];
@@ -241,6 +242,7 @@ void list_free(list *l) {
 }
 
 void dict_free(dict *d) {
+    if (!d) return;
     node *n;
     for (int i = 0; i < DICT_CAP; i++) {
         if (!d->entries[i].set) continue;
@@ -256,6 +258,7 @@ void dict_free(dict *d) {
 }
 
 void bytes_free(bytes *s) {
+    if (!s) return;
     free(s->r);
     free(s);
 }
@@ -682,9 +685,10 @@ typedef struct tnt {
     piece *pieces;
     bytes *hashes;
     int npieces;
+    unsigned char infohash[20];
 } tnt;
 
-tnt *tnt_create(dict *mi) {
+tnt *tnt_create(dict *mi, unsigned char infohash[20]) {
     tnt *t = malloc(sizeof(tnt));
     if (!t) return NULL;
     memset(t, 0, sizeof(tnt));
@@ -697,8 +701,7 @@ tnt *tnt_create(dict *mi) {
     info = n->v.d;
 
     n = dict_get(mi, "announce");
-    assert(n != NULL);
-    t->announce = n->v.s->vals;
+    if (n) t->announce = n->v.s->vals;
 
     n = dict_get(info, "piece length");
     assert(n != NULL);
@@ -749,7 +752,7 @@ tnt *tnt_create(dict *mi) {
     int npieces = t->hashes->len / 20;
     t->pieces = malloc(sizeof(piece) * npieces);
     if (!t->pieces) {
-        free(t->files)
+        free(t->files);
         free(t);
         return NULL;
     }
@@ -770,50 +773,145 @@ tnt *tnt_create(dict *mi) {
     t->downloaded = 0;
     t->uploaded = 0;
     t->metainfo = mi;
+    memcpy(t->infohash, infohash, 20);
 
     return t;
 }
 
 void tnt_free(tnt *t) {
+    if (!t) return;
     dict_free(t->metainfo);
     free(t->files);
     free(t->pieces);
     free(t);
 }
 
-void discov_peers(struct addrinfo *info, tnt *t) {
+#define HTTP 1
+#define HTTPS 2
+#define UDP 3
+#define DHT 4
+
+void split_uri(char *uri, int *proto, char host[256], char port[6], char path[1024]) {
+    if (!uri) {
+        *proto = DHT;
+        return;
+    }
+    int len = strlen(uri);
+    assert(len > 0);
+    int i = 0, j = 0;
+    while (uri[i++] != ':')
+        assert(len > i);
+    i--;
+    if (!strncmp(uri, "http", i))
+        *proto = HTTP;
+    else if (!strncmp(uri, "https", i))
+        *proto = HTTPS;
+    else if (!strncmp(uri, "udp", i))
+        *proto = UDP;
+    i += 3;
+    assert(len > i);
+    j = 0;
+    while (uri[i] != ':' && uri[i] != '/') {
+        host[j] = uri[i];
+        i++;
+        j++;
+        assert(len > i);
+    }
+    host[j] = 0;
+    j = 0;
+    if (uri[i] == ':') {
+        i++;
+        while (i < len && uri[i] != '/') {
+            port[j] = uri[i];
+            i++;
+            j++;
+        }
+        port[j] = 0;
+    }
+    j = 0;
+    while (i < len && uri[i] != '?') {
+        path[j] = uri[i];
+        i++;
+        j++;
+    }
+    path[j] = 0;
+}
+
+int discov_peers_http(struct addrinfo *info, tnt *t) {
+    return OK;
+}
+
+int discov_peers(tnt *t) {
+    int r;
+    int proto;
+    char host[256];
+    char port[6];
+    char path[1024];
+    split_uri(t->announce, &proto, host, port, path);
+    if (proto == HTTP) {
+        struct addrinfo *info = NULL;
+        r = resolve(&info, host, port, SOCK_STREAM);
+        if (r) {
+            E("couldn't resolve DNS for '%s': %s", host, gai_strerror(r));
+            return ERR;
+        }
+        return discov_peers_http(info, t);
+    } else {
+        E("tracker protocol is not supported");
+        return ERR;
+    }
+    return OK;
 }
 
 int main(int argc, char **argv) {
+    int r;
+
     if (argc != 2) {
         fprintf(stderr, "%s [torrent]\n", argv[0]);
         return 1;
     }
-    int r;
+
+    node n;
+    int x = 0;
     bytes *buf = bytes_create(2*1024*1024);
     char *filename = argv[1];
     r = readbin(filename, buf);
     if (r) {
-        E("error reading file: %s", filename);
-        exit(1);
+        E("couldn't read file: %s", filename);
+        goto error;
     }
-    int x = 0;
-    node n;
-    memset(&n, 0, sizeof(node));
     r = decode(buf, &n, &x);
     if (r) {
-        E("error decoding file: %s", filename);
-        exit(1);
+        E("couldn't decode file: %s", filename);
+        goto error;
     }
+
     node *info = dict_get(n.v.d, "info");
     assert(info != NULL);
-    unsigned char h[20];
-    gen_infohash(info->v.d, h);
+    unsigned char infohash[20];
+    r = gen_infohash(info->v.d, infohash);
+    if (r) {
+        E("couldn't generate infohash for file: %s", filename);
+        goto error;
+    }
 
-    bytes_free(buf);
+    tnt *t = tnt_create(n.v.d, infohash);
+    if (!t) goto error;
 
-    tnt *t = tnt_create(n.v.d);
+    r = discov_peers(t);
+    if (r) goto error;
+    
+    r = eloop_run(&L);
+    if (r) {
+        E("runtime failed");
+        goto error;
+    }
 
     tnt_free(t);
+    bytes_free(buf);
     return 0;
+error:
+    tnt_free(t);
+    bytes_free(buf);
+    return 1;
 }
