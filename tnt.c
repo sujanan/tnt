@@ -216,6 +216,45 @@ bytes *bytes_create(int cap) {
     return b;
 }
 
+void bytes_reset(bytes *s) {
+    s->len = 0;
+    s->cap = 0;
+}
+
+void list_free(list *l);
+void dict_free(dict *d);
+void bytes_free(bytes *s);
+
+void list_free(list *l) {
+    node *n;
+    for (int i = 0; i < l->len; i++) {
+        n = &l->vals[i];
+        if (n->t == DICT)
+            dict_free(n->v.d);
+        else if (n->t == LIST)
+            list_free(n->v.l);
+        else if (n->t == BYTES)
+            bytes_free(n->v.s);
+    }
+    free(l->vals);
+    free(l);
+}
+
+void dict_free(dict *d) {
+    node *n;
+    for (int i = 0; i < DICT_CAP; i++) {
+        if (!d->entries[i].set) continue;
+        n = &d->entries[i].v;
+        if (n->t == DICT)
+            dict_free(n->v.d);
+        else if (n->t == LIST)
+            list_free(n->v.l);
+        else if (n->t == BYTES)
+            bytes_free(n->v.s);
+    }
+    free(d);
+}
+
 void bytes_free(bytes *s) {
     free(s->r);
     free(s);
@@ -340,7 +379,7 @@ int decode(bytes *raw, node *n, int *x) {
             dict_put(d, k.v.s->vals, v);
             if (*x >= raw->len) return ERR;
             b = raw->vals[*x];
-            free(k.v.s);
+            bytes_free(k.v.s);
         }
         (*x)++; /* consume 'e' */
         n->v.d = d;
@@ -356,8 +395,9 @@ int decode(bytes *raw, node *n, int *x) {
             b = raw->vals[*x];
         }
         (*x)++; /* consume ':' */
-        bytes *s = bytes_create(l);
+        bytes *s = bytes_create(l+1);
         if (!s) return ERR;
+        s->vals[s->cap-1] = 0;
         for (int k = *x; k < *x+l; k++) {
             if (k >= raw->len) return ERR;
             b = raw->vals[k];
@@ -599,14 +639,19 @@ int gen_infohash(dict *info, unsigned char h[20]) {
     bytes *buf = bytes_create(2*1024*1024);
     if (!buf) return ERR;
     r = encode(buf, &n);
-    if (r) return r;
+    if (r) {
+    	bytes_free(buf);
+	    return r;
+    }
     sha1((unsigned char *) buf->vals, buf->len, h);
-    free(buf);
+    bytes_free(buf);
     return OK;
 }
 
+#define BLOCKSIZE 16384
+
 typedef struct file {
-    char *name;
+    char *path;
     int len;
 } file;
 
@@ -618,9 +663,9 @@ typedef struct peer {
 
 typedef struct piece {
     int i;
-    int hash;
     int len;
-    bytes *buf;
+    char s[BLOCKSIZE];
+    bytes buf;
     int downloaded;
     int requested;
 } piece;
@@ -631,15 +676,113 @@ typedef struct tnt {
     int uploaded;
     int downloaded;
     char *announce;
+    int len;
     int piecelen;
+    file *files;
     piece *pieces;
-    char *hashes[20];
-    file files[128];
+    bytes *hashes;
+    int npieces;
 } tnt;
+
+tnt *tnt_create(dict *mi) {
+    tnt *t = malloc(sizeof(tnt));
+    if (!t) return NULL;
+    memset(t, 0, sizeof(tnt));
+
+    node *n;
+    dict *info;
+
+    n = dict_get(mi, "info");
+    assert(n != NULL);
+    info = n->v.d;
+
+    n = dict_get(mi, "announce");
+    assert(n != NULL);
+    t->announce = n->v.s->vals;
+
+    n = dict_get(info, "piece length");
+    assert(n != NULL);
+    t->piecelen = n->v.i;
+
+    n = dict_get(info, "pieces");
+    assert(n != NULL);
+    t->hashes = n->v.s;
+
+    n = dict_get(info, "files");
+    if (n) {
+        file *files = malloc(sizeof(file) * n->v.l->len);
+        if (!files) {
+            free(t);
+            return NULL;
+        }
+
+        node *nf, *np, *nl;
+        for (int i = 0; i < n->v.l->len; i++) {
+            nf = &n->v.l->vals[i];
+            np = dict_get(nf->v.d, "path");
+            nl = dict_get(nf->v.d, "length");
+            assert(np != NULL);
+            assert(nl != NULL);
+            files[i].len = nl->v.i;
+            files[i].path = np->v.s->vals;
+            t->len += nl->v.i;
+        }
+        t->files = files;
+    } else {
+        file *files = malloc(sizeof(file));
+        if (!files) {
+            free(t);
+            return NULL;
+        }
+
+        node *np, *nl;
+        np = dict_get(info, "name");
+        nl = dict_get(info, "length");
+        assert(np != NULL);
+        assert(nl != NULL);
+        files[0].len = nl->v.i; 
+        files[0].path = np->v.s->vals;
+        t->len = nl->v.i;
+        t->files = files;
+    }
+
+    int npieces = t->hashes->len / 20;
+    t->pieces = malloc(sizeof(piece) * npieces);
+    if (!t->pieces) {
+        free(t->files)
+        free(t);
+        return NULL;
+    }
+    for (int i = 0; i < npieces; i++) {
+        t->pieces[i].i = i;
+        t->pieces[i].len = t->piecelen; 
+        t->pieces[i].downloaded = 0;
+        memset(t->pieces[i].s, 0, BLOCKSIZE);
+        t->pieces[i].buf.vals = t->pieces[i].s;
+        t->pieces[i].buf.len = 0;
+        t->pieces[i].buf.cap = 0;
+        t->pieces[i].requested = 0;
+    }
+    t->pieces[npieces-1].len = t->len - t->piecelen * (npieces-1);
+    t->npieces = npieces;
+
+    t->left = t->len;
+    t->downloaded = 0;
+    t->uploaded = 0;
+    t->metainfo = mi;
+
+    return t;
+}
+
+void tnt_free(tnt *t) {
+    dict_free(t->metainfo);
+    free(t->files);
+    free(t->pieces);
+    free(t);
+}
 
 void discov_peers(struct addrinfo *info, tnt *t) {
 }
-
 
 int main(int argc, char **argv) {
     if (argc != 2) {
@@ -648,23 +791,29 @@ int main(int argc, char **argv) {
     }
     int r;
     bytes *buf = bytes_create(2*1024*1024);
-    bytes *fub = bytes_create(2*1024*1024);
     char *filename = argv[1];
     r = readbin(filename, buf);
-    if (r) E("error reading file: %s", filename);
+    if (r) {
+        E("error reading file: %s", filename);
+        exit(1);
+    }
     int x = 0;
     node n;
     memset(&n, 0, sizeof(node));
     r = decode(buf, &n, &x);
-    if (r) E("error decoding file: %s", filename);
-    r = encode(fub, &n);
-    if (r) E("error encoding node");
-    assert(buf->len == fub->len);
-    for (int i = 0; i < buf->len; i++)
-        assert(buf->vals[i] == fub->vals[i]);
+    if (r) {
+        E("error decoding file: %s", filename);
+        exit(1);
+    }
     node *info = dict_get(n.v.d, "info");
     assert(info != NULL);
     unsigned char h[20];
     gen_infohash(info->v.d, h);
+
+    bytes_free(buf);
+
+    tnt *t = tnt_create(n.v.d);
+
+    tnt_free(t);
     return 0;
 }
