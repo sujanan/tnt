@@ -621,7 +621,6 @@ int t_conn(struct addrinfo *info, event_cb *cb) {
         if (r) close(fd);
         break;
     }
-    freeaddrinfo(info);
     return r;
 }
 
@@ -808,6 +807,7 @@ void split_uri(char *uri, int *proto, char host[256], char port[6], char path[10
         *proto = HTTPS;
     else if (!strncmp(uri, "udp", i))
         *proto = UDP;
+    if (!host) return;
     i += 3;
     assert(len > i);
     j = 0;
@@ -818,6 +818,7 @@ void split_uri(char *uri, int *proto, char host[256], char port[6], char path[10
         assert(len > i);
     }
     host[j] = 0;
+    if (!port) return;
     j = 0;
     if (uri[i] == ':') {
         i++;
@@ -828,6 +829,7 @@ void split_uri(char *uri, int *proto, char host[256], char port[6], char path[10
         }
         port[j] = 0;
     }
+    if (!path) return;
     j = 0;
     while (i < len && uri[i] != '?') {
         path[j] = uri[i];
@@ -837,25 +839,48 @@ void split_uri(char *uri, int *proto, char host[256], char port[6], char path[10
     path[j] = 0;
 }
 
-int discov_peers_http(struct addrinfo *info, tnt *t) {
-    return OK;
-}
-
-int discov_peers(tnt *t) {
+int discov_peers_http(tnt *t) {
     int r;
     int proto;
     char host[256];
     char port[6];
     char path[1024];
     split_uri(t->announce, &proto, host, port, path);
+    struct addrinfo *info = NULL;
+    r = resolve(&info, host, port, SOCK_STREAM);
+    if (r) {
+        E("couldn't resolve DNS for '%s': %s", host, gai_strerror(r));
+        freeaddrinfo(info);
+        return ERR;
+    }
+    int cap = strlen("GET HTTP/1.1\r\n") + sizeof(path) + 0
+        + strlen("Host: \r\n") + sizeof(host)
+        + strlen("Accept: */*\r\n");
+        + strlen("\r\n\r\n")
+        + 1;
+    bytes *req = bytes_create(cap);
+    if (!req) {
+        E("not enough memory");
+        goto error;
+    }
+    sprintf(req->vals,
+        "GET %s%s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Accept: */*\r\n"
+        "\r\n", path, "", host);
+    return OK;
+error:
+    bytes_free(req);
+    freeaddrinfo(info);
+    return ERR;
+}
+
+int discov_peers(tnt *t) {
+    int r;
+    int proto;
+    split_uri(t->announce, &proto, NULL, NULL, NULL);
     if (proto == HTTP) {
-        struct addrinfo *info = NULL;
-        r = resolve(&info, host, port, SOCK_STREAM);
-        if (r) {
-            E("couldn't resolve DNS for '%s': %s", host, gai_strerror(r));
-            return ERR;
-        }
-        return discov_peers_http(info, t);
+        return discov_peers_http(t);
     } else {
         E("tracker protocol is not supported");
         return ERR;
