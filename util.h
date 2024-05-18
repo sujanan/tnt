@@ -2,6 +2,9 @@
 #define UTIL_H
 
 #include <stdlib.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
 
 /* General utility functions */ 
 void sha1(unsigned char *data, size_t len, unsigned char digest[20]);
@@ -39,7 +42,26 @@ struct eloop {
 
 /* Event loop functions */
 int eloopAdd(struct eloop *eloop, int fd, int mask, onevent *onevent, void *data);
-void eloopRemove(struct eloop *eloop, struct event *e);
 int eloopProcess(struct eloop *eloop);
+void eloopRemove(struct eloop *eloop, struct event *e);
+
+/* Callback function to call when a tcpConnect, tcpSend or tcpRecv call finishes */ 
+typedef void tcpdone(int err, void *data);
+
+/* tcpclient is a structure that can be used for bookkeeping 
+ * when doing tcp send and recv calls. */
+struct tcpclient {
+    unsigned char *buf; /* buffer for sending and receiving data */
+    int buflen;         /* buffer length. Send data upto buflen */
+    int bufcap;         /* buffer capacity. Receive data upto bufcap */
+    tcpdone *tcpdone;   /* callback function */
+    void *data;         /* client data */
+};
+
+int resolve(struct addrinfo **info, char *host, char *port, int socktype);
+
+void tcpConnect(struct tcpclient *client, struct addrinfo *info);
+void tcpSend(struct tcpclient *client);
+void tcpRecv(struct tcpclient *client);
 
 #endif

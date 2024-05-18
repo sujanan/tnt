@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include "util.h"
 
 /* Maximum possible character length of an ipv4 or ipv6 address. */
 #define IP_STRLEN 40
@@ -12,15 +13,21 @@
 
 /* Piece is a fixed-size chunk of the overall file. */
 struct piece {
-    int index;      /* piece index */
-    int len;        /* piece length */
-    int requested;  /* requested number of bytes of the piece */
-    int downloaded; /* downloaded number of bytes of the piece */
-    int hash;       /* sha1 value of piece */
+    int index;          /* piece index */
+    int len;            /* piece length */
+    int requested;      /* requested number of bytes of the piece */
+    int downloaded;     /* downloaded number of bytes of the piece */
+    int hash;           /* sha1 value of piece */
+
+    /* A buffer to keep piece data. Capacity of the buffer
+     * should be length of the piece. */
+    unsigned char *buf; 
+
+    int buflen;         /* current length of the buffer */
 };
 
 /* Peer is a participant of the file sharing process.
- * Peer peer can either download or upload pieces. */
+ * Peer can either download or upload pieces. */
 struct peer {
     char id[20];               /* peer id */
     char ip[IP_STRLEN];        /* peer ip */
@@ -36,6 +43,10 @@ struct peer {
     ];
     int buflen;               /* buffer length. Send data upto buflen */
     int bufcap;               /* buffer capacity. Receive data upto bufcap */
+
+    /* A tcpclient to use when exchanging messages between peers. */
+    struct tcpclient tcpclient;
+
     int choked;               /* whether peer has choked us or not */
     int fd;                   /* socket descriptor */
     struct piece *piece;      /* piece peer currently downloading */
