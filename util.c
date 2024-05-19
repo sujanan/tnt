@@ -118,6 +118,36 @@ void urlencode(char *dest, char *src, int len) {
 }
 
 /**
+ * Returns the size of a given file
+ */
+int getFileSize(FILE *f) {
+    /* get current file location */
+    int prev = ftell(f);
+    if (prev == -1) return ERR_SYS;
+    /* seek to end */
+    fseek(f, 0L, SEEK_END);
+    /* get size */
+    int size = ftell(f);
+    if (size == -1) return ERR_SYS;
+    /* set back to previous location */
+    fseek(f, prev, SEEK_SET);
+    return size;
+}
+
+/**
+ * Reads a file to the given buffer.
+ * Make sure buffer has enough space.
+ */
+int readFile(unsigned char *buf, int bufcap, FILE *f) {
+    int r = fread(buf, 1, bufcap, f);
+    /* error occured after reading the file */
+    if (ferror(f)) return ERR_SYS;
+    /* haven't read entire file */
+    if (!feof(f)) return ERR_SYS;
+    return OK;
+}
+
+/**
  * Add an event to the event loop.
  */
 int eloopAdd(struct eloop *eloop, int fd, int mask, onevent *onevent, void *data) {
@@ -240,15 +270,14 @@ int resolve(struct addrinfo **info, char *host, char *port, int socktype) {
  */
 static void onConnect(struct eloop *eloop, int fd, void *data) {
     struct netclient *client = (struct netclient *) data;
-
-    client->onconnect(OK, fd, client->data);
+    client->onconnect(OK, eloop, fd, client->data);
 }
 
 /**
  * Try connecting to a given ip and port. Use resolve function to 
  * fill the info structure
  */
-void netConnect(struct netclient *client, struct addrinfo *info) {
+void netConnect(struct eloop *eloop, struct netclient *client, struct addrinfo *info) {
     int r;
     struct addrinfo *p = info;
 
@@ -273,20 +302,20 @@ void netConnect(struct netclient *client, struct addrinfo *info) {
     }
 
     /* error occured */
-    client->onconnect(ERR_SYS, -1, client->data);
+    client->onconnect(ERR_SYS, eloop, -1, client->data);
 }
 
 /**
  * Callback to run when socket is ready send data.
  */
 static void onSendReady(struct eloop *eloop, int fd, void *data) {
-    netSend((struct netclient *) data, fd);
+    netSend(eloop, (struct netclient *) data, fd);
 }
 
 /**
  * Sends bytes to a connected socket. Recursively sends until buffer is empty.
  */
-void netSend(struct netclient *client, int fd) {
+void netSend(struct eloop *eloop, struct netclient *client, int fd) {
     int err, n;
 
     n = send(fd, client->buf, client->buflen, MSG_NOSIGNAL);
@@ -304,28 +333,28 @@ void netSend(struct netclient *client, int fd) {
         client->buf += n;
 
         /* there is more to send */
-        netSend(client, fd);
+        netSend(eloop, client, fd);
     } else {
         /* we sent everything */
-        client->onsend(OK, fd, client->data);
+        client->onsend(OK, eloop, fd, client->data);
     }
     return;
 
 error:
-    client->onsend(err, fd, client->data);
+    client->onsend(err, eloop, fd, client->data);
 }
 
 /**
  * Callback to run when socket is ready receive data.
  */
 static void onRecvReady(struct eloop *eloop, int fd, void *data) {
-    netRecv((struct netclient *) data, fd);
+    netRecv(eloop, (struct netclient *) data, fd);
 }
 
 /**
  * Receive bytes from a connected socket. Recursively receives until buffer is full.
  */
-void netRecv(struct netclient *client, int fd) {
+void netRecv(struct eloop *eloop, struct netclient *client, int fd) {
     int err, n;
 
     n = recv(fd, client->buf + client->buflen, client->bufcap - client->buflen, MSG_NOSIGNAL);
@@ -346,14 +375,14 @@ void netRecv(struct netclient *client, int fd) {
         client->buflen += n;
 
         /* there is more to recv */
-        netRecv(client, fd);
+        netRecv(eloop, client, fd);
     } else {
         /* we received everything */
-        client->onrecv(OK, fd, client->buf, client->buflen, client->data);
+        client->onrecv(OK, eloop, fd, client->buf, client->buflen, client->data);
     }
     return;
 
 error:
-    client->onrecv(err, fd, client->buf, client->buflen, client->data);
+    client->onrecv(err, eloop, fd, client->buf, client->buflen, client->data);
 }
 

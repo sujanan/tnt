@@ -1,12 +1,6 @@
 #include <stdio.h>
 #include "util.h"
 
-/* Maximum possible character length of an ipv4 or ipv6 address. */
-#define IP_STRLEN 40
-
-/* Maximum possible character length of a port. */
-#define PORT_STRLEN 6
-
 /* Maximum number of bytes to be requested (REQUEST) at once 
  * when downloading a piece. */
 #define BLOCKSIZE 16384

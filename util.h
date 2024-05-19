@@ -6,6 +6,12 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
+/* Maximum possible character length of an ipv4 or ipv6 address. */
+#define IP_STRLEN 40
+
+/* Maximum possible character length of a port. */
+#define PORT_STRLEN 6
+
 /* General utility functions */ 
 void sha1(unsigned char *data, size_t len, unsigned char digest[20]);
 void urlencode(char *dest, char *src, int len);
@@ -46,9 +52,10 @@ int eloopProcess(struct eloop *eloop);
 void eloopRemove(struct eloop *eloop, struct event *e);
 
 /* Callback function to call when a netConnect, netSend or netRecv call finishes */ 
-typedef void onconnect(int err, int fd, void *data);
-typedef void onsend(int err, int fd, void *data);
-typedef void onrecv(int err, int fd, unsigned char *buf, int buflen, void *data);
+typedef void onconnect(int err, struct eloop *eloop, int fd, void *data);
+typedef void onsend(int err, struct eloop *eloop, int fd, void *data);
+typedef void onrecv(int err, 
+        struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data);
 
 /* netclient is a structure that can be used for bookkeeping 
  * when doing networking calls. It keeps everything related to connect, send and recv.
@@ -64,10 +71,16 @@ struct netclient {
     void *data;           /* client data */
 };
 
-/* Networking related functions */
+/* Networking functions */
 int resolve(struct addrinfo **info, char *host, char *port, int socktype);
-void netConnect(struct netclient *client, struct addrinfo *info);
-void netSend(struct netclient *client, int fd);
-void netRecv(struct netclient *client, int fd);
+void netConnect(struct eloop *eloop, struct netclient *client, struct addrinfo *info);
+void netSend(struct eloop *eloop, struct netclient *client, int fd);
+void netRecv(struct eloop *eloop, struct netclient *client, int fd);
+
+/* Callback function of httpGet. buf is allocated. Make sure to free when done with it. */ 
+typedef void onhttp(int err, char *url, unsigned char *buf, int buflen);
+
+/* Http function */
+void httpGet(struct eloop *eloop, char *url, onhttp *onhttp);
 
 #endif
