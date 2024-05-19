@@ -51,11 +51,12 @@ typedef void tcpdone(int err, void *data);
 /* tcpclient is a structure that can be used for bookkeeping 
  * when doing tcp send and recv calls. */
 struct tcpclient {
-    unsigned char *buf; /* buffer for sending and receiving data */
-    int buflen;         /* buffer length. Send data upto buflen */
-    int bufcap;         /* buffer capacity. Receive data upto bufcap */
-    tcpdone *tcpdone;   /* callback function */
-    void *data;         /* client data */
+    struct eloop *eloop; /* reference to event loop */
+    unsigned char *buf;  /* buffer for sending and receiving data */
+    int buflen;          /* buffer length. Send data upto buflen */
+    int bufcap;          /* buffer capacity. Receive data upto bufcap */
+    tcpdone *done;       /* callback function */
+    void *data;          /* client data */
 };
 
 int resolve(struct addrinfo **info, char *host, char *port, int socktype);

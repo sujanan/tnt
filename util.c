@@ -222,3 +222,49 @@ int eloopProcess(struct eloop *eloop) {
     return OK;
 }
 
+/**
+ * Fill addrinfo structure for a given host and port.  
+ * Returns error returned by underline getaddrinfo call.
+ */
+int resolve(struct addrinfo **info, char *host, char *port, int socktype) {
+    int r;
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = socktype;
+    return getaddrinfo(host, port, &hints, info);
+}
+
+static void onTcpConnect(struct eloop *eloop, int fd, void *data) {
+    struct tcpclient *client = (struct tcpclient *) data;
+
+    client->done(OK, client->data);
+}
+
+void tcpConnect(struct tcpclient *client, struct addrinfo *info) {
+    int r;
+    struct addrinfo *p = info;
+
+    for (; p; p = p->ai_next) {
+        int fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd == -1)
+            continue;
+        r = fcntl(fd, F_SETFL, O_NONBLOCK);
+        if (r == -1) {
+            close(fd);
+            continue;
+        }
+        r = connect(fd, p->ai_addr, p->ai_addrlen);
+        if (r == -1 && errno != EINPROGRESS)
+            close(fd);
+        r = eloop_add(client->eloop, fd, ELOOP_W, onTcpConnect, client);
+        if (r)
+            close(fd);
+        break;
+    }
+
+    /* error occured */
+    client->done(ERR_SYS, client->data);
+}
+
+
