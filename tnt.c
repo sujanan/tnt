@@ -44,8 +44,8 @@ struct peer {
     int buflen;               /* buffer length. Send data upto buflen */
     int bufcap;               /* buffer capacity. Receive data upto bufcap */
 
-    /* A tcpclient to use when exchanging messages between peers. */
-    struct tcpclient tcpclient;
+    /* A netclient to use when exchanging messages between peers. */
+    struct netclient netclient;
 
     int choked;               /* whether peer has choked us or not */
     int fd;                   /* socket descriptor */

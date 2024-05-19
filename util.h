@@ -11,9 +11,9 @@ void sha1(unsigned char *data, size_t len, unsigned char digest[20]);
 void urlencode(char *dest, char *src, int len);
 
 /* Types of errors */
-#define OK 0       /* no error */
-#define ERR_LIB 1  /* error due to invalid inputs */
-#define ERR_SYS 2  /* system error. errno is set */
+#define OK 0                /* no error */
+#define ERR_SYS 1           /* std error. errno is set */
+#define ERR_SOCK_CLOSED 2   /* peer has closed the socket */
 
 struct eloop;
 
@@ -45,24 +45,29 @@ int eloopAdd(struct eloop *eloop, int fd, int mask, onevent *onevent, void *data
 int eloopProcess(struct eloop *eloop);
 void eloopRemove(struct eloop *eloop, struct event *e);
 
-/* Callback function to call when a tcpConnect, tcpSend or tcpRecv call finishes */ 
-typedef void tcpdone(int err, void *data);
+/* Callback function to call when a netConnect, netSend or netRecv call finishes */ 
+typedef void onconnect(int err, int fd, void *data);
+typedef void onsend(int err, int fd, void *data);
+typedef void onrecv(int err, int fd, unsigned char *buf, int buflen, void *data);
 
-/* tcpclient is a structure that can be used for bookkeeping 
- * when doing tcp send and recv calls. */
-struct tcpclient {
-    struct eloop *eloop; /* reference to event loop */
-    unsigned char *buf;  /* buffer for sending and receiving data */
-    int buflen;          /* buffer length. Send data upto buflen */
-    int bufcap;          /* buffer capacity. Receive data upto bufcap */
-    tcpdone *done;       /* callback function */
-    void *data;          /* client data */
+/* netclient is a structure that can be used for bookkeeping 
+ * when doing networking calls. It keeps everything related to connect, send and recv.
+ * Fill up only the necessary things before calling. */
+struct netclient {
+    struct eloop *eloop;  /* reference to event loop */
+    unsigned char *buf;   /* buffer for sending and receiving data */
+    int buflen;           /* buffer length. Send data upto buflen */
+    int bufcap;           /* buffer capacity. Receive data upto bufcap */
+    onconnect *onconnect; /* function to call when connects */
+    onsend *onsend;       /* function to call when data has sent */
+    onrecv *onrecv;       /* function to call when data has received */
+    void *data;           /* client data */
 };
 
+/* Networking related functions */
 int resolve(struct addrinfo **info, char *host, char *port, int socktype);
-
-void tcpConnect(struct tcpclient *client, struct addrinfo *info);
-void tcpSend(struct tcpclient *client);
-void tcpRecv(struct tcpclient *client);
+void netConnect(struct netclient *client, struct addrinfo *info);
+void netSend(struct netclient *client, int fd);
+void netRecv(struct netclient *client, int fd);
 
 #endif

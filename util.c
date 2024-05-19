@@ -235,13 +235,20 @@ int resolve(struct addrinfo **info, char *host, char *port, int socktype) {
     return getaddrinfo(host, port, &hints, info);
 }
 
-static void onTcpConnect(struct eloop *eloop, int fd, void *data) {
-    struct tcpclient *client = (struct tcpclient *) data;
+/**
+ * Callback to run when socket connects.
+ */
+static void onConnect(struct eloop *eloop, int fd, void *data) {
+    struct netclient *client = (struct netclient *) data;
 
-    client->done(OK, client->data);
+    client->onconnect(OK, fd, client->data);
 }
 
-void tcpConnect(struct tcpclient *client, struct addrinfo *info) {
+/**
+ * Try connecting to a given ip and port. Use resolve function to 
+ * fill the info structure
+ */
+void netConnect(struct netclient *client, struct addrinfo *info) {
     int r;
     struct addrinfo *p = info;
 
@@ -257,14 +264,96 @@ void tcpConnect(struct tcpclient *client, struct addrinfo *info) {
         r = connect(fd, p->ai_addr, p->ai_addrlen);
         if (r == -1 && errno != EINPROGRESS)
             close(fd);
-        r = eloop_add(client->eloop, fd, ELOOP_W, onTcpConnect, client);
+
+        /* add socket to the event loop and wait for it to connect */
+        r = eloopAdd(client->eloop, fd, ELOOP_W, onConnect, client);
         if (r)
             close(fd);
         break;
     }
 
     /* error occured */
-    client->done(ERR_SYS, client->data);
+    client->onconnect(ERR_SYS, -1, client->data);
 }
 
+/**
+ * Callback to run when socket is ready send data.
+ */
+static void onSendReady(struct eloop *eloop, int fd, void *data) {
+    netSend((struct netclient *) data, fd);
+}
+
+/**
+ * Sends bytes to a connected socket. Recursively sends until buffer is empty.
+ */
+void netSend(struct netclient *client, int fd) {
+    int err, n;
+
+    n = send(fd, client->buf, client->buflen, MSG_NOSIGNAL);
+    if (n == -1) {
+        /* socket when to blocking */
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            err = eloopAdd(client->eloop, fd, ELOOP_W, onSendReady, client);
+            if (err) goto error;
+        } else {
+            err = ERR_SYS;
+            goto error;
+        }
+    } else if (n < client->buflen) {
+        client->buflen -= n;
+        client->buf += n;
+
+        /* there is more to send */
+        netSend(client, fd);
+    } else {
+        /* we sent everything */
+        client->onsend(OK, fd, client->data);
+    }
+    return;
+
+error:
+    client->onsend(err, fd, client->data);
+}
+
+/**
+ * Callback to run when socket is ready receive data.
+ */
+static void onRecvReady(struct eloop *eloop, int fd, void *data) {
+    netRecv((struct netclient *) data, fd);
+}
+
+/**
+ * Receive bytes from a connected socket. Recursively receives until buffer is full.
+ */
+void netRecv(struct netclient *client, int fd) {
+    int err, n;
+
+    n = recv(fd, client->buf + client->buflen, client->bufcap - client->buflen, MSG_NOSIGNAL);
+    if (n == -1) {
+        /* socket when to blocking */
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            err = eloopAdd(client->eloop, fd, ELOOP_R, onRecvReady, client);
+            if (err) goto error;
+        } else {
+            err = ERR_SYS;
+            goto error;
+        }
+    } else if (n == 0) {
+        /* socket has been closed */
+        err = ERR_SOCK_CLOSED;
+        goto error;
+    } else if (n < client->bufcap) {
+        client->buflen += n;
+
+        /* there is more to recv */
+        netRecv(client, fd);
+    } else {
+        /* we received everything */
+        client->onrecv(OK, fd, client->buf, client->buflen, client->data);
+    }
+    return;
+
+error:
+    client->onrecv(err, fd, client->buf, client->buflen, client->data);
+}
 
