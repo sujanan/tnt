@@ -13,6 +13,23 @@
 #include <ctype.h>
 #include "util.h"
 
+/**
+ * An implementation of FreeBsd strnstr.
+ */
+char *strstr_n(char *haystack, const char *needle, size_t n) {
+    size_t nlen = strlen(needle);
+    if (nlen == 0)
+        return haystack;
+
+    char *s = haystack;
+    char *e = haystack + n - nlen - 1; 
+    for (; s < e; s++) {
+        if (!strncmp(s, needle, nlen))
+            return s;
+    }
+    return NULL;
+}
+
 typedef int32_t i32;
 typedef uint32_t u32;
 #define ROTL(value, bits) (((value) << (bits)) | ((value) >> (32 - (bits))))
@@ -253,6 +270,18 @@ int eloopProcess(struct eloop *eloop) {
 }
 
 /**
+ * Start the event loop and process until there are no events left.
+ */
+int eloopRun(struct eloop *eloop) {
+    while (eloop->head) {
+        int err = eloopProcess(eloop);
+        /* error occured no need to continue */
+        if (err) return err;
+    }
+    return OK;
+}
+
+/**
  * Fill addrinfo structure for a given host and port.  
  * Returns error returned by underline getaddrinfo call.
  */
@@ -307,7 +336,7 @@ void netConnect(struct eloop *eloop,
         r = eloopAdd(eloop, fd, ELOOP_W, onConnect, netdata);
         if (r)
             close(fd);
-        break;
+        return;
     }
 
     /* error occured */
@@ -421,8 +450,118 @@ error:
     onrecv(err, eloop, fd, netdata->buf, netdata->buflen, netdata->data);
 }
 
-static void onHttpGetConnect(int err, struct eloop *eloop, int fd, void *data) {
+static inline void freeHttpdata(struct httpdata *h) {
+    free(h->req);
+    free(h);
+}
 
+static void onHttpGetRecv(int err, 
+                          struct eloop *eloop, 
+                          int fd, 
+                          unsigned char *buf, 
+                          int buflen, 
+                          void *data) {
+    struct httpdata *httpdata = (struct httpdata *) data;
+    if (err) goto error;
+
+    /* copy tcp buffer to http response buffer */
+    memcpy(httpdata->res + httpdata->reslen, buf, buflen);
+    httpdata->reslen += buflen;
+    unsigned char *res = httpdata->res;
+    int reslen = httpdata->reslen;
+
+    /* response is not OK */
+    const char *ok = "HTTP/1.1 200 OK";
+    if (strncmp(res, ok, strlen(ok))) {
+        err = ERR_HTTP_FAILED;
+        goto error;
+    }
+
+    /* find the separation of head and body */
+    char *separator = strstr_n(res, "\r\n\r\n", reslen);
+    /* head of the request may not be available or too large for us to extract */
+    if (!separator) {
+        err = ERR_HTTP_FAILED;
+        goto error;
+    } 
+
+    /* head of the request */
+    char *head = res;
+    int headlen = separator - head;
+
+    /* find Content-Length header within the head */
+    char *prefix = "Content-Length: ";
+    char *header = strstr_n(head, prefix, headlen);
+    /* doesn't have a Content-Length header */
+    if (!header) {
+        err = ERR_HTTP_FAILED;
+        goto error;
+    }
+    char *contentlen = header + strlen(prefix);
+
+    /* parse Content-Length header */
+    int bodylen = 0;
+    int i = 0;
+    while (isdigit(contentlen[i]))
+        bodylen = bodylen * 10 + contentlen[i++] - '0';
+
+    /* complete length of the HTTP response */
+    int len = headlen + 4 + bodylen;
+
+    if (httpdata->reslen < len) {
+        /* there is more to read */
+        int bufcap = len - httpdata->reslen;
+        httpdata->res = realloc(httpdata->res, len);
+        if (!httpdata->res)  {
+            err = ERR_SYS;
+            goto error;
+        }
+
+        resetNetdata(&httpdata->tcp);
+        netRecv(eloop, fd, httpdata->res + httpdata->reslen, bufcap,
+                onHttpGetRecv, httpdata, &httpdata->tcp);
+    } else {
+        /* response is complete */
+        httpdata->onhttp(OK, httpdata->url, httpdata->res, httpdata->reslen);
+        close(fd);
+        freeHttpdata(httpdata);
+    }
+
+    return;
+error:
+    close(fd);
+    httpdata->onhttp(err, httpdata->url, httpdata->res, httpdata->reslen);
+    freeHttpdata(httpdata);
+}
+
+static void onHttpGetSend(int err, struct eloop *eloop, int fd, void *data) {
+    struct httpdata *httpdata = (struct httpdata *) data;
+    if (err) goto error;
+
+    unsigned char *res = malloc(1024);
+    if (!res) goto error;
+    httpdata->res = res;
+    httpdata->reslen = 0;
+
+    resetNetdata(&httpdata->tcp);
+    netRecv(eloop, fd, httpdata->res, 1024, onHttpGetRecv, httpdata, &httpdata->tcp);
+
+    return;
+error:
+    httpdata->onhttp(err, httpdata->url, NULL, 0);
+    freeHttpdata(httpdata);
+}
+
+static void onHttpGetConnect(int err, struct eloop *eloop, int fd, void *data) {
+    struct httpdata *httpdata = (struct httpdata *) data;
+    if (err) goto error;
+
+    netSend(eloop, fd, httpdata->req, httpdata->reqlen, onHttpGetSend, httpdata, &httpdata->tcp);
+
+    return;
+error:
+    httpdata->onhttp(err, httpdata->url, NULL, 0);
+    freeHttpdata(httpdata);
 }
 
 /**
@@ -492,9 +631,14 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
         + strlen("Accept: */*\r\n")                                             /* accept header */
         + strlen("\r\n");                                                       /* separator */
 
+    /* need to have '/' at front */
+    pathlen += 1;
     /* set enough size for port 80 */
     if (portlen == 0)
         portlen = 2;
+    /* set enough size for '?' as well */
+    if (querylen > 0)
+        querylen += 1;
 
     char host[hostlen+1];
     char port[portlen+1];
@@ -505,15 +649,21 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
     memset(path, 0, sizeof(path));
     memset(query, 0, sizeof(query));
 
+    /* copy the port if not set 80 as the port */
     strncpy(host, hoststr, hostlen);
     if (portstr)
         strncpy(port, portstr, portlen);
     else
         strcpy(port, "80");
+    /* copy the port with '/' in the front */
+    path[0] = '/';
     if (pathstr)
-        strncpy(path, pathstr, pathlen);
-    if (querystr)
-        strncpy(query, querystr, querylen);
+        strncpy(path+1, pathstr, pathlen);
+    /* copy the query parameters with '?' in the front */
+    if (querystr) {
+        query[0] = '?';
+        strncpy(query+1, querystr, querylen);
+    }
 
     /* create request */
     char *req = malloc(reqlen+1);
@@ -522,7 +672,7 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
         return;
     }
     snprintf(req, reqlen,
-        "GET /%s?%s HTTP/1.1\r\n"
+        "GET %s%s HTTP/1.1\r\n"
         "Host: %s\r\n"
         "Accept: */*\r\n"
         "\r\n", path, query, host);
@@ -541,11 +691,14 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
     }
 
     memset(httpdata, 0, sizeof(*httpdata));
-    httpdata->tcp.buf = req;
-    httpdata->tcp.buflen = reqlen;
-    httpdata->tcp.bufcap = reqlen + 1;
+    httpdata->url = url;
+    httpdata->req = req;
+    httpdata->reqlen = reqlen;
     httpdata->onhttp = onhttp;
+    
+    netConnect(eloop, info, onHttpGetConnect, httpdata, &httpdata->tcp);
 
+    freeaddrinfo(info);
     return;
 
 error:

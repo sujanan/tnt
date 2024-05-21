@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <string.h>
+#include <errno.h>
 #include "util.h"
 
 /* Maximum number of bytes to be requested (REQUEST) at once 
@@ -68,7 +70,20 @@ struct tnt {
     int uploaded;               /* uploaded bytes */
 };
 
-#include <string.h>
+void onExampleResponse(int err, char *url, unsigned char *buf, int buflen) {
+    if (err) {
+        printf("error occured: %s\n", strerror(errno));
+        return;
+    }
+}
+
 int main(int argc, char **argv) {
+    struct eloop eloop;
+    memset(&eloop, 0, sizeof(eloop));
+
+    httpGet(&eloop, "http://example.com", onExampleResponse);
+
+    eloopRun(&eloop);
+
     return 0;
 }

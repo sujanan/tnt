@@ -2,6 +2,7 @@
 #define UTIL_H
 
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -22,6 +23,7 @@ void urlencode(char *dest, char *src, int len);
 #define ERR_GAI 2           /* error in getaddrinfo call */
 #define ERR_SOCK_CLOSED 3   /* socket is closed */
 #define ERR_HTTP_URL 4      /* invalid HTTP URL */
+#define ERR_HTTP_FAILED 5   /* http request didn't given an OK response */
 
 struct eloop;
 
@@ -52,6 +54,7 @@ struct eloop {
 int eloopAdd(struct eloop *eloop, int fd, int mask, onevent *onevent, void *data);
 int eloopProcess(struct eloop *eloop);
 void eloopRemove(struct eloop *eloop, struct event *e);
+int eloopRun(struct eloop *eloop);
 
 /* Callback function to call when a netConnect, netSend or netRecv call finishes */ 
 typedef void onconnect(int err, struct eloop *eloop, int fd, void *data);
@@ -59,9 +62,9 @@ typedef void onsend(int err, struct eloop *eloop, int fd, void *data);
 typedef void onrecv(int err, 
         struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data);
 
-/* netdata is a structure that can be used for bookkeeping 
- * when doing networking calls. It keeps everything related to connect, send and recv.
- * Fill up only the necessary things before calling. */
+/* netdata is an internal structure used for bookkeeping when doing networking calls. 
+ * Callers of the net* functions do not have to fill any fields but should allocate it
+ * using malloc. */
 struct netdata {
     unsigned char *buf;   /* buffer for sending and receiving data */
     int buflen;           /* buffer length. Send data upto buflen */
@@ -69,6 +72,11 @@ struct netdata {
     void *fn;             /* callback function. could be onconnect, onsend or onrecv */
     void *data;           /* client data */
 };
+
+/* Reset netdata structure */
+static inline void resetNetdata(struct netdata *n) {
+    memset(n, 0, sizeof(struct netdata));
+}
 
 /* Networking functions */
 int resolve(struct addrinfo **info, char *host, char *port, int socktype);
@@ -83,8 +91,11 @@ void netRecv(struct eloop *eloop, int fd, unsigned char *buf,
 typedef void onhttp(int err, char *url, unsigned char *buf, int buflen);
 
 struct httpdata {
+    char *url;
+    unsigned char *req;
     unsigned char *res;
-    int reslen;
+    int reqlen;
+    int reslen; 
     struct netdata tcp;
     onhttp *onhttp;
 };
