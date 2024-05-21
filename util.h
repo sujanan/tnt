@@ -77,7 +77,7 @@ void netConnect(struct eloop *eloop, struct addrinfo *info,
 void netSend(struct eloop *eloop, int fd, unsigned char *buf, 
         int buflen, onsend *onsend, void *data, struct netdata *netdata);
 void netRecv(struct eloop *eloop, int fd, unsigned char *buf, 
-        int buflen, int bufcap, onrecv *onrecv, void *data, struct netdata *netdata);
+        int bufcap, onrecv *onrecv, void *data, struct netdata *netdata);
 
 /* Callback function of httpGet. buf is allocated. Make sure to free when done with it. */ 
 typedef void onhttp(int err, char *url, unsigned char *buf, int buflen);

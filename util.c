@@ -370,8 +370,7 @@ error:
  */
 static void onRecvReady(struct eloop *eloop, int fd, void *data) {
     struct netdata *netdata = (struct netdata *) data;
-    netRecv(eloop, fd, netdata->buf, 
-            netdata->buflen, netdata->bufcap, netdata->fn, netdata->data, netdata);
+    netRecv(eloop, fd, netdata->buf, netdata->bufcap, netdata->fn, netdata->data, netdata);
 }
 
 /**
@@ -380,7 +379,6 @@ static void onRecvReady(struct eloop *eloop, int fd, void *data) {
 void netRecv(struct eloop *eloop, 
              int fd, 
              unsigned char *buf,
-             int buflen,
              int bufcap,
              onrecv *onrecv,
              void *data,
@@ -388,7 +386,6 @@ void netRecv(struct eloop *eloop,
     int err, n;
 
     netdata->buf = buf;
-    netdata->buflen = buflen;
     netdata->bufcap = bufcap;
     netdata->fn = onrecv;
     netdata->data = data;
@@ -411,7 +408,7 @@ void netRecv(struct eloop *eloop,
         netdata->buflen += n;
 
         /* there is more to recv */
-        netRecv(eloop, fd, buf, buflen, bufcap, onrecv, data, netdata);
+        netRecv(eloop, fd, buf, bufcap, onrecv, data, netdata);
     } else {
         netdata->buflen += n;
 
