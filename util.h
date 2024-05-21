@@ -19,7 +19,9 @@ void urlencode(char *dest, char *src, int len);
 /* Types of errors */
 #define OK 0                /* no error */
 #define ERR_SYS 1           /* std error. errno is set */
-#define ERR_SOCK_CLOSED 2   /* peer has closed the socket */
+#define ERR_GAI 2           /* error in getaddrinfo call */
+#define ERR_SOCK_CLOSED 3   /* socket is closed */
+#define ERR_HTTP_URL 4      /* invalid HTTP URL */
 
 struct eloop;
 
@@ -57,30 +59,35 @@ typedef void onsend(int err, struct eloop *eloop, int fd, void *data);
 typedef void onrecv(int err, 
         struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data);
 
-/* netclient is a structure that can be used for bookkeeping 
+/* netdata is a structure that can be used for bookkeeping 
  * when doing networking calls. It keeps everything related to connect, send and recv.
  * Fill up only the necessary things before calling. */
-struct netclient {
-    struct eloop *eloop;  /* reference to event loop */
+struct netdata {
     unsigned char *buf;   /* buffer for sending and receiving data */
     int buflen;           /* buffer length. Send data upto buflen */
     int bufcap;           /* buffer capacity. Receive data upto bufcap */
-    onconnect *onconnect; /* function to call when connects */
-    onsend *onsend;       /* function to call when data has sent */
-    onrecv *onrecv;       /* function to call when data has received */
+    void *fn;             /* callback function. could be onconnect, onsend or onrecv */
     void *data;           /* client data */
 };
 
 /* Networking functions */
 int resolve(struct addrinfo **info, char *host, char *port, int socktype);
-void netConnect(struct eloop *eloop, struct netclient *client, struct addrinfo *info);
-void netSend(struct eloop *eloop, struct netclient *client, int fd);
-void netRecv(struct eloop *eloop, struct netclient *client, int fd);
+void netConnect(struct eloop *eloop, 
+        struct netdata *netdata, struct addrinfo *info, onconnect *onconnect);
+void netSend(struct eloop *eloop, struct netdata *netdata, int fd, onsend *onsend);
+void netRecv(struct eloop *eloop, struct netdata *netdata, int fd, onrecv *onrecv);
 
 /* Callback function of httpGet. buf is allocated. Make sure to free when done with it. */ 
 typedef void onhttp(int err, char *url, unsigned char *buf, int buflen);
 
-/* Http function */
+struct httpdata {
+    unsigned char *res;
+    int reslen;
+    struct netdata tcp;
+    onhttp *onhttp;
+};
+
+/* HTTP GET */
 void httpGet(struct eloop *eloop, char *url, onhttp *onhttp);
 
 #endif

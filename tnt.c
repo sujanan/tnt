@@ -38,8 +38,8 @@ struct peer {
     int buflen;               /* buffer length. Send data upto buflen */
     int bufcap;               /* buffer capacity. Receive data upto bufcap */
 
-    /* A netclient to use when exchanging messages between peers. */
-    struct netclient netclient;
+    /* A netdata to use when exchanging messages between peers. */
+    struct netdata netdata;
 
     int choked;               /* whether peer has choked us or not */
     int fd;                   /* socket descriptor */
@@ -68,6 +68,7 @@ struct tnt {
     int uploaded;               /* uploaded bytes */
 };
 
+#include <string.h>
 int main(int argc, char **argv) {
     return 0;
 }

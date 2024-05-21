@@ -269,22 +269,29 @@ int resolve(struct addrinfo **info, char *host, char *port, int socktype) {
  * Callback to run when socket connects.
  */
 static void onConnect(struct eloop *eloop, int fd, void *data) {
-    struct netclient *client = (struct netclient *) data;
-    client->onconnect(OK, eloop, fd, client->data);
+    struct netdata *netdata = (struct netdata *) data;
+    onconnect *onconnect = netdata->fn;
+    onconnect(OK, eloop, fd, netdata->data);
 }
 
 /**
  * Try connecting to a given ip and port. Use resolve function to 
  * fill the info structure
  */
-void netConnect(struct eloop *eloop, struct netclient *client, struct addrinfo *info) {
+void netConnect(struct eloop *eloop, 
+                struct netdata *netdata, 
+                struct addrinfo *info,
+                onconnect *onconnect) {
     int r;
     struct addrinfo *p = info;
+
+    netdata->fn = onconnect;
 
     for (; p; p = p->ai_next) {
         int fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (fd == -1)
             continue;
+        /* set socket to non-blocking */
         r = fcntl(fd, F_SETFL, O_NONBLOCK);
         if (r == -1) {
             close(fd);
@@ -295,73 +302,79 @@ void netConnect(struct eloop *eloop, struct netclient *client, struct addrinfo *
             close(fd);
 
         /* add socket to the event loop and wait for it to connect */
-        r = eloopAdd(client->eloop, fd, ELOOP_W, onConnect, client);
+        r = eloopAdd(eloop, fd, ELOOP_W, onConnect, netdata);
         if (r)
             close(fd);
         break;
     }
 
     /* error occured */
-    client->onconnect(ERR_SYS, eloop, -1, client->data);
+    onconnect(ERR_SYS, eloop, -1, netdata->data);
 }
 
 /**
  * Callback to run when socket is ready send data.
  */
 static void onSendReady(struct eloop *eloop, int fd, void *data) {
-    netSend(eloop, (struct netclient *) data, fd);
+    struct netdata *netdata = (struct netdata *) data;
+    netSend(eloop, (struct netdata *) data, fd, netdata->fn);
 }
 
 /**
  * Sends bytes to a connected socket. Recursively sends until buffer is empty.
  */
-void netSend(struct eloop *eloop, struct netclient *client, int fd) {
+void netSend(struct eloop *eloop, struct netdata *netdata, int fd, onsend *onsend) {
     int err, n;
 
-    n = send(fd, client->buf, client->buflen, MSG_NOSIGNAL);
+    netdata->fn = onsend;
+
+    n = send(fd, netdata->buf, netdata->buflen, MSG_NOSIGNAL);
     if (n == -1) {
-        /* socket when to blocking */
+        /* send operation didn't complete immediately  */
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            err = eloopAdd(client->eloop, fd, ELOOP_W, onSendReady, client);
+            err = eloopAdd(eloop, fd, ELOOP_W, onSendReady, netdata);
             if (err) goto error;
         } else {
             err = ERR_SYS;
             goto error;
         }
-    } else if (n < client->buflen) {
-        client->buflen -= n;
-        client->buf += n;
+    } else if (n < netdata->buflen) {
+        netdata->buflen -= n;
+        netdata->buf += n;
 
         /* there is more to send */
-        netSend(eloop, client, fd);
+        netSend(eloop, netdata, fd, onsend);
     } else {
         /* we sent everything */
-        client->onsend(OK, eloop, fd, client->data);
+        onsend(OK, eloop, fd, netdata->data);
     }
     return;
 
 error:
-    client->onsend(err, eloop, fd, client->data);
+    onsend(err, eloop, fd, netdata->data);
 }
 
 /**
  * Callback to run when socket is ready receive data.
  */
 static void onRecvReady(struct eloop *eloop, int fd, void *data) {
-    netRecv(eloop, (struct netclient *) data, fd);
+    struct netdata *netdata = (struct netdata *) data;
+    netRecv(eloop, (struct netdata *) data, fd, netdata->fn);
 }
 
 /**
  * Receive bytes from a connected socket. Recursively receives until buffer is full.
  */
-void netRecv(struct eloop *eloop, struct netclient *client, int fd) {
+void netRecv(struct eloop *eloop, struct netdata *netdata, int fd, onrecv *onrecv) {
     int err, n;
 
-    n = recv(fd, client->buf + client->buflen, client->bufcap - client->buflen, MSG_NOSIGNAL);
+    netdata->fn = onrecv;
+
+    n = recv(fd, netdata->buf + netdata->buflen, netdata->bufcap - netdata->buflen, MSG_NOSIGNAL);
     if (n == -1) {
-        /* socket when to blocking */
+        /* recv operation didn't complete immediately  */
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            err = eloopAdd(client->eloop, fd, ELOOP_R, onRecvReady, client);
+            err = eloopAdd(eloop, fd, ELOOP_R, onRecvReady, netdata);
             if (err) goto error;
         } else {
             err = ERR_SYS;
@@ -371,18 +384,149 @@ void netRecv(struct eloop *eloop, struct netclient *client, int fd) {
         /* socket has been closed */
         err = ERR_SOCK_CLOSED;
         goto error;
-    } else if (n < client->bufcap) {
-        client->buflen += n;
+    } else if (n < netdata->bufcap) {
+        netdata->buflen += n;
 
         /* there is more to recv */
-        netRecv(eloop, client, fd);
+        netRecv(eloop, netdata, fd, onrecv);
     } else {
         /* we received everything */
-        client->onrecv(OK, eloop, fd, client->buf, client->buflen, client->data);
+        onrecv(OK, eloop, fd, netdata->buf, netdata->buflen, netdata->data);
     }
     return;
 
 error:
-    client->onrecv(err, eloop, fd, client->buf, client->buflen, client->data);
+    onrecv(err, eloop, fd, netdata->buf, netdata->buflen, netdata->data);
+}
+
+static void onHttpGetConnect(int err, struct eloop *eloop, int fd, void *data) {
+
+}
+
+/**
+ * This method sends a simple HTTP/1.1 GET request to a given url.
+ * It doesn't support extra headers or any other specs in the protocol. 
+ * End of stream is only identified by parsing the Content-Length header.
+ * Upon success or failure onhttp is called.
+ */
+void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
+    int err;
+
+    /* Extract protocol, host, port, path and query parameters
+     * out of given URL.  */  
+
+    char *r, *s = url;
+    char *protostr, *hoststr, *portstr, *pathstr, *querystr;
+    int protolen, hostlen, portlen, pathlen, querylen;
+    protostr = hoststr = portstr = pathstr = querystr = NULL;
+    protolen = hostlen = portlen = pathlen = querylen = 0;
+
+    r = strstr(s, "://");
+    if (r && strlen(r + 3) > 0) {
+        protostr = s;
+        protolen = r - s;
+        s = r + 3;
+        hoststr = s;
+        hostlen = strlen(s);
+    } else {
+        onhttp(ERR_HTTP_URL, url, NULL, 0);
+        return;
+    }
+    r = strstr(s, ":");
+    if (r && strlen(r + 1) > 0) {
+        if (s == hoststr) hostlen = r - s;
+        s = r + 1;
+        portstr = s;
+        portlen = strlen(s);
+    }
+    r = strstr(s, "/");
+    if (r && strlen(r + 1) > 0) {
+        if (s == hoststr) hostlen = r - s;
+        if (s == portstr) portlen = r - s;
+        s = r + 1;
+        pathstr = s;
+        pathlen = strlen(s);
+    }
+    r = strstr(s, "?");
+    if (r && strlen(r + 1) > 0) {
+        if (s == hoststr) hostlen = r - s;
+        if (s == portstr) portlen = r - s;
+        if (s == pathstr) pathlen = r - s;
+        s = r + 1;
+        querystr = s;
+        querylen = strlen(s);
+    }
+
+    /* protocol must be 'http' */
+    if (!protostr || strncmp(protostr, "http", protolen)) {
+        onhttp(ERR_HTTP_URL, url, NULL, 0);
+        return;
+    }
+
+    /* calculate request length */
+    int reqlen = 
+        + strlen("GET ") + 1 + pathlen + 1 + querylen + strlen(" HTTP/1.1\r\n") /* request line */
+        + strlen("Host: ") + hostlen + strlen("\r\n")                           /* host header */
+        + strlen("Accept: */*\r\n")                                             /* accept header */
+        + strlen("\r\n");                                                       /* separator */
+
+    /* set enough size for port 80 */
+    if (portlen == 0)
+        portlen = 2;
+
+    char host[hostlen+1];
+    char port[portlen+1];
+    char path[pathlen+1];
+    char query[querylen+1];
+    memset(host, 0, sizeof(host));
+    memset(port, 0, sizeof(port));
+    memset(path, 0, sizeof(path));
+    memset(query, 0, sizeof(query));
+
+    strncpy(host, hoststr, hostlen);
+    if (portstr)
+        strncpy(port, portstr, portlen);
+    else
+        strcpy(port, "80");
+    if (pathstr)
+        strncpy(path, pathstr, pathlen);
+    if (querystr)
+        strncpy(query, querystr, querylen);
+
+    /* create request */ 
+    char *req = malloc(reqlen+1);
+    if (!req) {
+        onhttp(ERR_SYS, url, NULL, 0);
+        return;
+    }
+    snprintf(req, reqlen,
+        "GET /%s?%s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Accept: */*\r\n"
+        "\r\n", path, query, host);
+
+    struct addrinfo *info = NULL;
+    err = resolve(&info, host, port, SOCK_STREAM);
+    if (err) {
+        err = ERR_GAI;
+        goto error;
+    }
+
+    struct netdata *netdata = malloc(sizeof(struct netdata));
+    if (!netdata) {
+        err = ERR_SYS;
+        goto error;
+    }
+    memset(netdata, 0, sizeof(*netdata));
+    netdata->buf = (unsigned char *) req;
+    netdata->buflen = reqlen;
+    netdata->bufcap = reqlen + 1;
+    
+    return;
+
+error:
+    free(req);
+    freeaddrinfo(info);
+    onhttp(err, url, NULL, 0);
 }
 
