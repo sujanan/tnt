@@ -72,10 +72,12 @@ struct netdata {
 
 /* Networking functions */
 int resolve(struct addrinfo **info, char *host, char *port, int socktype);
-void netConnect(struct eloop *eloop, 
-        struct netdata *netdata, struct addrinfo *info, onconnect *onconnect);
-void netSend(struct eloop *eloop, struct netdata *netdata, int fd, onsend *onsend);
-void netRecv(struct eloop *eloop, struct netdata *netdata, int fd, onrecv *onrecv);
+void netConnect(struct eloop *eloop, struct addrinfo *info, 
+        onconnect *onconnect, void *data, struct netdata *netdata);
+void netSend(struct eloop *eloop, int fd, unsigned char *buf, 
+        int buflen, onsend *onsend, void *data, struct netdata *netdata);
+void netRecv(struct eloop *eloop, int fd, unsigned char *buf, 
+        int buflen, int bufcap, onrecv *onrecv, void *data, struct netdata *netdata);
 
 /* Callback function of httpGet. buf is allocated. Make sure to free when done with it. */ 
 typedef void onhttp(int err, char *url, unsigned char *buf, int buflen);

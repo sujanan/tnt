@@ -279,13 +279,15 @@ static void onConnect(struct eloop *eloop, int fd, void *data) {
  * fill the info structure
  */
 void netConnect(struct eloop *eloop, 
-                struct netdata *netdata, 
                 struct addrinfo *info,
-                onconnect *onconnect) {
+                onconnect *onconnect,
+                void *data,
+                struct netdata *netdata) {
     int r;
     struct addrinfo *p = info;
 
     netdata->fn = onconnect;
+    netdata->data = data;
 
     for (; p; p = p->ai_next) {
         int fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
@@ -317,16 +319,25 @@ void netConnect(struct eloop *eloop,
  */
 static void onSendReady(struct eloop *eloop, int fd, void *data) {
     struct netdata *netdata = (struct netdata *) data;
-    netSend(eloop, (struct netdata *) data, fd, netdata->fn);
+    netSend(eloop, fd, netdata->buf, netdata->buflen, netdata->fn, netdata->data, netdata);
 }
 
 /**
  * Sends bytes to a connected socket. Recursively sends until buffer is empty.
  */
-void netSend(struct eloop *eloop, struct netdata *netdata, int fd, onsend *onsend) {
+void netSend(struct eloop *eloop, 
+             int fd, 
+             unsigned char *buf,
+             int buflen,
+             onsend *onsend,
+             void *data,
+             struct netdata *netdata) {
     int err, n;
 
+    netdata->buf = buf;
+    netdata->buflen = buflen;
     netdata->fn = onsend;
+    netdata->data = data;
 
     n = send(fd, netdata->buf, netdata->buflen, MSG_NOSIGNAL);
     if (n == -1) {
@@ -343,7 +354,7 @@ void netSend(struct eloop *eloop, struct netdata *netdata, int fd, onsend *onsen
         netdata->buf += n;
 
         /* there is more to send */
-        netSend(eloop, netdata, fd, onsend);
+        netSend(eloop, fd, buf, buflen, onsend, data, netdata);
     } else {
         /* we sent everything */
         onsend(OK, eloop, fd, netdata->data);
@@ -359,16 +370,28 @@ error:
  */
 static void onRecvReady(struct eloop *eloop, int fd, void *data) {
     struct netdata *netdata = (struct netdata *) data;
-    netRecv(eloop, (struct netdata *) data, fd, netdata->fn);
+    netRecv(eloop, fd, netdata->buf, 
+            netdata->buflen, netdata->bufcap, netdata->fn, netdata->data, netdata);
 }
 
 /**
  * Receive bytes from a connected socket. Recursively receives until buffer is full.
  */
-void netRecv(struct eloop *eloop, struct netdata *netdata, int fd, onrecv *onrecv) {
+void netRecv(struct eloop *eloop, 
+             int fd, 
+             unsigned char *buf,
+             int buflen,
+             int bufcap,
+             onrecv *onrecv,
+             void *data,
+             struct netdata *netdata) {
     int err, n;
 
+    netdata->buf = buf;
+    netdata->buflen = buflen;
+    netdata->bufcap = bufcap;
     netdata->fn = onrecv;
+    netdata->data = data;
 
     n = recv(fd, netdata->buf + netdata->buflen, netdata->bufcap - netdata->buflen, MSG_NOSIGNAL);
     if (n == -1) {
@@ -388,8 +411,10 @@ void netRecv(struct eloop *eloop, struct netdata *netdata, int fd, onrecv *onrec
         netdata->buflen += n;
 
         /* there is more to recv */
-        netRecv(eloop, netdata, fd, onrecv);
+        netRecv(eloop, fd, buf, buflen, bufcap, onrecv, data, netdata);
     } else {
+        netdata->buflen += n;
+
         /* we received everything */
         onrecv(OK, eloop, fd, netdata->buf, netdata->buflen, netdata->data);
     }
@@ -493,7 +518,7 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
     if (querystr)
         strncpy(query, querystr, querylen);
 
-    /* create request */ 
+    /* create request */
     char *req = malloc(reqlen+1);
     if (!req) {
         onhttp(ERR_SYS, url, NULL, 0);
@@ -505,6 +530,12 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
         "Accept: */*\r\n"
         "\r\n", path, query, host);
 
+    struct httpdata *httpdata = malloc(sizeof(struct httpdata));
+    if (!httpdata) {
+        err = ERR_SYS;
+        goto error;
+    }
+
     struct addrinfo *info = NULL;
     err = resolve(&info, host, port, SOCK_STREAM);
     if (err) {
@@ -512,20 +543,17 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
         goto error;
     }
 
-    struct netdata *netdata = malloc(sizeof(struct netdata));
-    if (!netdata) {
-        err = ERR_SYS;
-        goto error;
-    }
-    memset(netdata, 0, sizeof(*netdata));
-    netdata->buf = (unsigned char *) req;
-    netdata->buflen = reqlen;
-    netdata->bufcap = reqlen + 1;
-    
+    memset(httpdata, 0, sizeof(*httpdata));
+    httpdata->tcp.buf = req;
+    httpdata->tcp.buflen = reqlen;
+    httpdata->tcp.bufcap = reqlen + 1;
+    httpdata->onhttp = onhttp;
+
     return;
 
 error:
     free(req);
+    free(httpdata);
     freeaddrinfo(info);
     onhttp(err, url, NULL, 0);
 }
