@@ -1,6 +1,7 @@
 #ifndef UTIL_H
 #define UTIL_H
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -16,6 +17,8 @@
 /* General utility functions */ 
 void sha1(unsigned char *data, size_t len, unsigned char digest[20]);
 void urlencode(char *dest, char *src, int len);
+int findFileSize(int *size, FILE *f);
+int readFile(unsigned char *buf, int bufcap, FILE *f);
 
 /* Types of errors */
 #define OK 0                /* no error */

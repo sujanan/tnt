@@ -212,7 +212,11 @@ struct bytes *bytesCreate(int cap) {
 /**
  * Free a bytes structure.
  */
-inline void bytesFree(struct bytes *s) { free(s); }
+inline void bytesFree(struct bytes *s) { 
+    if (!s) return;
+    free(s->vals);
+    free(s); 
+}
 
 /**
  * Converts a node into bytes using bencode encoding format.
@@ -483,20 +487,62 @@ struct tnt {
     int uploaded;               /* uploaded bytes */
 };
 
-void onExampleResponse(int err, char *url, unsigned char *buf, int buflen) {
-    if (err) {
-        printf("error occured: %s\n", strerror(errno));
-        return;
+typedef void onpeers(int err, struct eloop *eloop, struct tnt *tnt);
+void discoverPeers(struct eloop *eloop, struct tnt *tnt, onpeers *onpeers);
+
+void discoverPeers(struct eloop *eloop, struct tnt *tnt, onpeers *onpeers) {
+    struct tracker *tracker = &tnt->tracker;
+    if (!strncmp(tracker->announce, "http://", 7)) {
+
+    } else {
+        onpeers(ERR_SYS, eloop, tnt);
     }
 }
 
+/**
+ * Open, read and decode a .torrent file.
+ */
+int readTorrentFile(struct node *n, const char *filename) {
+    int err;
+
+    /* open file */
+    FILE *f = fopen(filename, "rb");
+    if (!f) return ERR_SYS;
+
+    /* get file size */
+    int size;
+    err = findFileSize(&size, f);
+    if (err) return err;
+    size += 1;
+
+    /* read file */
+    unsigned char buf[size];
+    memset(buf, 0, size);
+    err = readFile(buf, size, f);
+    if (err) return err;
+
+    /* decode */
+    int x = 0;
+    struct bytes raw = {.vals = buf, .len = size, .cap = size};
+    err = decode(&raw, n, &x);
+    if (err) return err;
+
+    fclose(f);
+    return OK;
+}
+
 int main(int argc, char **argv) {
-    struct eloop eloop;
-    memset(&eloop, 0, sizeof(eloop));
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <torrent>\n", argv[0]);
+        return 1;
+    }
 
-    httpGet(&eloop, "http://example.com", onExampleResponse);
+    int err;
 
-    eloopRun(&eloop);
+    struct node node;
+    const char *filename = argv[1];
+    err = readTorrentFile(&node, filename);
 
+    dictFree(node.v.d);
     return 0;
 }

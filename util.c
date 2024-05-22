@@ -137,18 +137,18 @@ void urlencode(char *dest, char *src, int len) {
 /**
  * Returns the size of a given file
  */
-int getFileSize(FILE *f) {
+int findFileSize(int *size, FILE *f) {
     /* get current file location */
     int prev = ftell(f);
     if (prev == -1) return ERR_SYS;
     /* seek to end */
     fseek(f, 0L, SEEK_END);
     /* get size */
-    int size = ftell(f);
-    if (size == -1) return ERR_SYS;
+    *size = ftell(f);
+    if (*size == -1) return ERR_SYS;
     /* set back to previous location */
     fseek(f, prev, SEEK_SET);
-    return size;
+    return OK;
 }
 
 /**
