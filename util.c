@@ -696,6 +696,7 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
     httpdata->reqlen = reqlen;
     httpdata->onhttp = onhttp;
     
+    /* initiate TCP connection */
     netConnect(eloop, info, onHttpGetConnect, httpdata, &httpdata->tcp);
 
     freeaddrinfo(info);

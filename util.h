@@ -24,6 +24,8 @@ void urlencode(char *dest, char *src, int len);
 #define ERR_SOCK_CLOSED 3   /* socket is closed */
 #define ERR_HTTP_URL 4      /* invalid HTTP URL */
 #define ERR_HTTP_FAILED 5   /* http request didn't given an OK response */
+#define ERR_BEN_ENC 6       /* bencode encoding failed */
+#define ERR_BEN_DEC 7       /* bencode decoding failed */
 
 struct eloop;
 
