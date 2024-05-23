@@ -30,6 +30,32 @@ int readFile(unsigned char *buf, int bufcap, FILE *f);
 #define ERR_BEN_ENC 6       /* bencode encoding failed */
 #define ERR_BEN_DEC 7       /* bencode decoding failed */
 
+/* Error strings for defined errors */
+static const char *tnterrors[] = {
+    "Ok",
+    "System error",
+    "Error in getaddrinfo",
+    "Socket is closed",
+    "Invalid HTTP URL",
+    "HTTP request failed",
+    "Bencode encoding failed",
+    "Bencode decoding failed"
+};
+
+
+/* Log levels */
+#define LOG_DEBUG 0   /* shows all the logs */
+#define LOG_INFO 1    /* shows info and error logs */
+#define LOG_ERROR 2   /* shows only error logs */
+
+/* Log level is set to info */
+#define LL LOG_INFO
+
+/* Logging functions */
+void logError(int err, const char *fmt, ...);
+void logInfo(const char *fmt, ...);
+void logDebug(const char *fmt, ...);
+
 struct eloop;
 
 /* Callback function of the event */ 

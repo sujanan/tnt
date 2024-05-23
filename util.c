@@ -11,7 +11,69 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <errno.h>
+#include <assert.h>
 #include "util.h"
+
+/**
+ * Logging function
+ */
+static void tntLogVa(int lvl, const char *fmt, va_list ap) {
+    if (lvl < LL) return;
+
+    char msg[1024];
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    const char *s[] = {"D", "I", "E"};
+    FILE *f = lvl == LOG_ERROR ? stderr : stdout;
+    fprintf(f, "%s | %s\n", s[lvl], msg);
+}
+
+static void tntLog(int lvl, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    tntLogVa(lvl, fmt, ap);
+    va_end(ap);
+}
+
+/**
+ * Log erorrs
+ */
+void logError(int err, const char *fmt, ...) {
+    assert(err < sizeof(tnterrors)/sizeof(tnterrors[0]) && err > 0);
+
+    va_list ap;
+    char msg[1024];
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    const char *errstr;
+    if (err == ERR_SYS && errno) 
+        errstr = strerror(errno);
+    errstr = tnterrors[err];
+
+    tntLog(LOG_ERROR, "%s: %s", msg, errstr);
+}
+
+/**
+ * Log info 
+ */
+void logInfo(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    tntLogVa(LOG_INFO, fmt, ap);
+    va_end(ap);
+}
+
+/**
+ * Log debug 
+ */
+void logDebug(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    tntLogVa(LOG_DEBUG, fmt, ap);
+    va_end(ap);
+}
 
 /**
  * An implementation of FreeBsd strnstr.

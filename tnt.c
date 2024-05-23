@@ -487,15 +487,27 @@ struct tnt {
     int uploaded;               /* uploaded bytes */
 };
 
-typedef void onpeers(int err, struct eloop *eloop, struct tnt *tnt);
-void discoverPeers(struct eloop *eloop, struct tnt *tnt, onpeers *onpeers);
+/* Peer discovery functions */
+void discoverPeers(struct eloop *eloop, struct tnt *tnt);
+void onPeers(int err, struct eloop *elooop, struct tnt *tnt);
 
-void discoverPeers(struct eloop *eloop, struct tnt *tnt, onpeers *onpeers) {
+void onPeers(int err, struct eloop *elooop, struct tnt *tnt) {
+}
+
+/**
+ * Discover peers based on the announce field in tnt.tracker. 
+ * It fills the peers field in tracker. Only supports HTTP. 
+ * Upon success or failure, onPeers function will get called. 
+ * Note that discoverPeers is only called once in our program. 
+ * If we wish to call it periodically, we can add it as a time event 
+ * in the event loop. Right now we don't have the ability to do time events.
+ */
+void discoverPeers(struct eloop *eloop, struct tnt *tnt) {
     struct tracker *tracker = &tnt->tracker;
-    if (!strncmp(tracker->announce, "http://", 7)) {
 
-    } else {
-        onpeers(ERR_SYS, eloop, tnt);
+    if (strncmp(tracker->announce, "http://", 7)) {
+        onPeers(ERR_HTTP_URL, eloop, tnt);
+        return;  
     }
 }
 
