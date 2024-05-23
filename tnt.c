@@ -49,6 +49,11 @@ struct dictentry {
 struct dict {
     struct dictentry entries[DICT_CAP]; /* entries of the dict */
     int len;                            /* number of entries in the dict */
+
+    /* Number of bytes dictionary takes if it is to be encoded
+     * using bencode. nbytes is useful for generating info hash. */
+    int nbytes;
+
     struct dictentry *head;             /* first entry of the dict */
 };
 
@@ -370,6 +375,7 @@ int decode(struct bytes *raw, struct node *n, int *x) {
         struct dict *d = dictCreate();
         if (!d) return ERR_SYS;
 
+        int start = *x;
         (*x)++; /* consume 'd' */
         while (b != 'e') {
             struct node k, v;
@@ -384,7 +390,9 @@ int decode(struct bytes *raw, struct node *n, int *x) {
             bytesFree(k.v.s);
         }
         (*x)++; /* consume 'e' */
+        int end = *x;
 
+        d->nbytes = end - start;
         n->v.d = d;
         n->t = DICT;
     } else {
@@ -424,13 +432,16 @@ int decode(struct bytes *raw, struct node *n, int *x) {
  * when downloading a piece. */
 #define BLOCKSIZE 16384
 
+/* Peer to peer port */
+#define P2P_PORT "6881"
+
 /* Piece is a fixed-size chunk of the overall file. */
 struct piece {
-    int index;          /* piece index */
-    int len;            /* piece length */
-    int requested;      /* requested number of bytes of the piece */
-    int downloaded;     /* downloaded number of bytes of the piece */
-    int hash;           /* sha1 value of piece */
+    int index;              /* piece index */
+    int len;                /* piece length */
+    int requested;          /* requested number of bytes of the piece */
+    int downloaded;         /* downloaded number of bytes of the piece */
+    unsigned char hash[20]; /* sha1 value of piece */
 
     /* A buffer to keep piece data. Capacity of the buffer
      * should be length of the piece. */
@@ -487,6 +498,8 @@ struct tnt {
     int uploaded;               /* uploaded bytes */
 };
 
+int initTnt(struct tnt **tnt, struct dict *metainfo);
+
 /* Peer discovery functions */
 void discoverPeers(struct eloop *eloop, struct tnt *tnt);
 void onPeers(int err, struct eloop *elooop, struct tnt *tnt);
@@ -505,10 +518,110 @@ void onPeers(int err, struct eloop *elooop, struct tnt *tnt) {
 void discoverPeers(struct eloop *eloop, struct tnt *tnt) {
     struct tracker *tracker = &tnt->tracker;
 
+    /* protocol is not HTTP */
     if (strncmp(tracker->announce, "http://", 7)) {
         onPeers(ERR_HTTP_URL, eloop, tnt);
         return;  
     }
+
+    /* params */
+    char infohash[20*3+1];
+    char peerid[20*3+1];
+    urlencode(infohash, tnt->infohash, 20);
+    urlencode(peerid, tnt->peerid, 20);
+    char *port = P2P_PORT;
+    int uploaded = tnt->uploaded;
+    int downloaded = tnt->downloaded;
+    int left = tnt->left;
+
+    /* build URL */
+
+    /* Calculate URL length. 10 is character length of INT_MAX and
+     * we have 3 integers. 6*2 is for '?', '&' and '=' characters.  */ 
+    int urllen = strlen(tracker->announce) + strlen(infohash) + strlen(peerid) + PORT_STRLEN + 10*3 + 6*2 + 1;
+    char url[urllen];
+    snprintf(url, sizeof(url),
+        "%s"
+        "?info_hash=%s"
+        "&peer_id=%s"
+        "&port=%s"
+        "&uploaded=%d"
+        "&downloaded=%d"
+        "&left=%d",
+        tracker->announce, infohash, peerid, port, uploaded, downloaded, left);
+}
+
+/**
+ * Generate infohash from info dictionary.
+ * Here we encode the info dictionary and generate the hash.
+ * We can do this because our dictionary maintain insertion
+ * order and our encode function respect it when encoding
+ * dictionaries. Other data structures maintain order by definition 
+ * but the dictionaries don't. Since we have that covered
+ * as well, our encode function should ideally generate same
+ * bytes we use to decode.
+ */
+int genInfoHash(unsigned char infohash[20], struct dict *info) {
+    int err;
+
+    struct node n = {.v.d = info, .t = DICT};
+    unsigned char vals[info->nbytes];
+    struct bytes buf = {.vals = vals, .len = 0, .cap = sizeof(vals)};
+
+    err = encode(&buf, &n);
+    if (err) return err;
+
+    sha1(buf.vals, buf.len, infohash);
+
+    return OK;
+}
+
+/**
+ * Creates an initiate int structure using torrent metainfo.
+ * This function assumes metainfo is correct.
+ */
+int initTnt(struct tnt **tnt, struct dict *metainfo) {
+    *tnt = malloc(sizeof(struct tnt));
+    if (!(*tnt)) return ERR_SYS;
+    memset(*tnt, 0, sizeof(struct tnt));
+
+    struct tnt *t = *tnt;
+
+    /* tracker */
+    char *announce = dictGet(metainfo, "announce")->v.s->vals;
+    t->tracker.announce = announce;
+    t->tracker.peers = NULL;
+    t->tracker.plen = 0;
+    t->tracker.ppos = 0;
+
+    struct dict *info = dictGet(metainfo, "info")->v.d;
+
+    /* pieces */
+    struct bytes *hashes = dictGet(info, "pieces")->v.s;
+    int npieces = hashes->len / 20;
+    t->pieces = malloc(sizeof(struct piece) * npieces);
+    if (t->pieces) {
+        free(t);
+        return ERR_SYS;
+    }
+    for (int i = 0; i < npieces; i++) {
+        struct piece *p = &t->pieces[i];
+        p->index = i;
+        p->requested = 0;
+        p->downloaded = 0;
+        memcpy(p->hash, hashes->vals + i*20, 20);
+        p->buf = NULL;
+        p->buflen = 0;
+    }
+    t->plen = npieces;
+    t->ppos = 0;
+
+    /* infohash */
+    /* peerid */
+    /* files */
+    /* other */
+
+    return OK;
 }
 
 /**
@@ -554,6 +667,14 @@ int main(int argc, char **argv) {
     struct node node;
     const char *filename = argv[1];
     err = readTorrentFile(&node, filename);
+
+    struct dict *metainfo = node.v.d;
+    struct dict *info = dictGet(metainfo, "info")->v.d;
+    unsigned char infohash[20];
+
+    genInfoHash(infohash, info);
+    for (int i = 0; i < 20; i++)
+        printf("%d", infohash[i]);
 
     dictFree(node.v.d);
     return 0;
