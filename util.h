@@ -118,8 +118,9 @@ void netSend(struct eloop *eloop, int fd, unsigned char *buf,
 void netRecv(struct eloop *eloop, int fd, unsigned char *buf, 
         int bufcap, onrecv *onrecv, void *data, struct netdata *netdata);
 
-/* Callback function of httpGet. buf is allocated. Make sure to free when done with it. */ 
-typedef void onhttp(int err, char *url, unsigned char *buf, int buflen);
+/* Callback function of httpGet. res is allocated. Make sure to free when done with it. */ 
+typedef void onhttp(int err, struct eloop *eloop, 
+        char *url, unsigned char *res, int reslen, unsigned char *body, void *data);
 
 struct httpdata {
     char *url;
@@ -129,9 +130,10 @@ struct httpdata {
     int reslen; 
     struct netdata tcp;
     onhttp *onhttp;
+    void *data;
 };
 
 /* HTTP GET */
-void httpGet(struct eloop *eloop, char *url, onhttp *onhttp);
+void httpGet(struct eloop *eloop, char *url, onhttp *onhttp, void *data);
 
 #endif

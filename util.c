@@ -523,6 +523,11 @@ static void onHttpGetRecv(int err,
                           unsigned char *buf, 
                           int buflen, 
                           void *data) {
+    char *head = NULL;
+    char *body = NULL;
+    int headlen = 0;
+    int bodylen = 0;
+
     struct httpdata *httpdata = (struct httpdata *) data;
     if (err) goto error;
 
@@ -539,6 +544,7 @@ static void onHttpGetRecv(int err,
         goto error;
     }
 
+    head = res;
     /* find the separation of head and body */
     char *separator = strstr_n(res, "\r\n\r\n", reslen);
     /* head of the request may not be available or too large for us to extract */
@@ -548,8 +554,8 @@ static void onHttpGetRecv(int err,
     } 
 
     /* head of the request */
-    char *head = res;
-    int headlen = separator - head;
+    headlen = separator - head;
+    body = head + headlen + 4;
 
     /* find Content-Length header within the head */
     char *prefix = "Content-Length: ";
@@ -562,7 +568,6 @@ static void onHttpGetRecv(int err,
     char *contentlen = header + strlen(prefix);
 
     /* parse Content-Length header */
-    int bodylen = 0;
     int i = 0;
     while (isdigit(contentlen[i]))
         bodylen = bodylen * 10 + contentlen[i++] - '0';
@@ -584,7 +589,8 @@ static void onHttpGetRecv(int err,
                 onHttpGetRecv, httpdata, &httpdata->tcp);
     } else {
         /* response is complete */
-        httpdata->onhttp(OK, httpdata->url, httpdata->res, httpdata->reslen);
+        httpdata->onhttp(OK, eloop, httpdata->url, 
+                httpdata->res, httpdata->reslen, body, httpdata->data);
         close(fd);
         freeHttpdata(httpdata);
     }
@@ -592,7 +598,8 @@ static void onHttpGetRecv(int err,
     return;
 error:
     close(fd);
-    httpdata->onhttp(err, httpdata->url, httpdata->res, httpdata->reslen);
+    httpdata->onhttp(err, eloop, httpdata->url, 
+            httpdata->res, httpdata->reslen, body, httpdata->data);
     freeHttpdata(httpdata);
 }
 
@@ -610,7 +617,7 @@ static void onHttpGetSend(int err, struct eloop *eloop, int fd, void *data) {
 
     return;
 error:
-    httpdata->onhttp(err, httpdata->url, NULL, 0);
+    httpdata->onhttp(err, eloop, httpdata->url, NULL, 0, NULL, httpdata->data);
     freeHttpdata(httpdata);
 }
 
@@ -622,7 +629,7 @@ static void onHttpGetConnect(int err, struct eloop *eloop, int fd, void *data) {
 
     return;
 error:
-    httpdata->onhttp(err, httpdata->url, NULL, 0);
+    httpdata->onhttp(err, eloop, httpdata->url, NULL, 0, NULL, httpdata->data);
     freeHttpdata(httpdata);
 }
 
@@ -632,7 +639,7 @@ error:
  * End of stream is only identified by parsing the Content-Length header.
  * Upon success or failure onhttp is called.
  */
-void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
+void httpGet(struct eloop *eloop, char *url, onhttp *onhttp, void *data) {
     int err;
 
     /* Extract protocol, host, port, path and query parameters
@@ -652,7 +659,7 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
         hoststr = s;
         hostlen = strlen(s);
     } else {
-        onhttp(ERR_HTTP_URL, url, NULL, 0);
+        onhttp(ERR_HTTP_URL, eloop, url, NULL, 0, NULL, data);
         return;
     }
     r = strstr(s, ":");
@@ -682,30 +689,21 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
 
     /* protocol must be 'http' */
     if (!protostr || strncmp(protostr, "http", protolen)) {
-        onhttp(ERR_HTTP_URL, url, NULL, 0);
+        onhttp(ERR_HTTP_URL, eloop, url, NULL, 0, NULL, data);
         return;
     }
 
     /* calculate request length */
     int reqlen = 
         + strlen("GET ") + 1 + pathlen + 1 + querylen + strlen(" HTTP/1.1\r\n") /* request line */
-        + strlen("Host: ") + hostlen + strlen("\r\n")                           /* host header */
+        + strlen("Host: ") + hostlen + 1 + portlen + strlen("\r\n")             /* host header */
         + strlen("Accept: */*\r\n")                                             /* accept header */
         + strlen("\r\n");                                                       /* separator */
 
-    /* need to have '/' at front */
-    pathlen += 1;
-    /* set enough size for port 80 */
-    if (portlen == 0)
-        portlen = 2;
-    /* set enough size for '?' as well */
-    if (querylen > 0)
-        querylen += 1;
-
     char host[hostlen+1];
-    char port[portlen+1];
-    char path[pathlen+1];
-    char query[querylen+1];
+    char port[portlen == 0 ? 3 : portlen+1];              /* set enough size for port 80 */
+    char path[1+pathlen+1];                               /* need to have '/' at front */
+    char query[querylen > 0 ? 1+querylen+1 : querylen+1]; /* set enough size for '?' as well */
     memset(host, 0, sizeof(host));
     memset(port, 0, sizeof(port));
     memset(path, 0, sizeof(path));
@@ -730,14 +728,15 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
     /* create request */
     char *req = malloc(reqlen+1);
     if (!req) {
-        onhttp(ERR_SYS, url, NULL, 0);
+        onhttp(ERR_SYS, eloop, url, NULL, 0, NULL, data);
         return;
     }
-    snprintf(req, reqlen,
+    snprintf(req, reqlen+1,
         "GET %s%s HTTP/1.1\r\n"
-        "Host: %s\r\n"
+        "Host: %s:%s\r\n"
         "Accept: */*\r\n"
-        "\r\n", path, query, host);
+        "\r\n", path, query, host, port);
+    reqlen = strlen(req);
 
     struct httpdata *httpdata = malloc(sizeof(struct httpdata));
     if (!httpdata) {
@@ -757,6 +756,7 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp) {
     httpdata->req = req;
     httpdata->reqlen = reqlen;
     httpdata->onhttp = onhttp;
+    httpdata->data = data;
     
     /* initiate TCP connection */
     netConnect(eloop, info, onHttpGetConnect, httpdata, &httpdata->tcp);
@@ -768,6 +768,6 @@ error:
     free(req);
     free(httpdata);
     freeaddrinfo(info);
-    onhttp(err, url, NULL, 0);
+    onhttp(err, eloop, url, NULL, 0, NULL, data);
 }
 

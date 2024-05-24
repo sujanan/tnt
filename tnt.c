@@ -2,6 +2,8 @@
 #include <string.h>
 #include <errno.h>
 #include <assert.h>
+#include <unistd.h>
+
 #include "util.h"
 
 #define KEY_LEN 512  /* maximum allowed length for a dict key */
@@ -484,6 +486,12 @@ struct tracker {
     int ppos;           /* current position of peers */
 };
 
+/* Infomation about a downloading/uploading file */
+struct file {
+    char *path; /* file path along with name of the file */
+    int len;    /* length of the file */
+};
+
 /* tnt is our internal structure to keep track of everything we do.
  * All the peers keep a reference to tnt. */
 struct tnt {
@@ -496,15 +504,51 @@ struct tnt {
     int left;                   /* bytes left to download */
     int downloaded;             /* downloaded bytes */
     int uploaded;               /* uploaded bytes */
+    struct file *files;         /* downloading/uploading files */
+    int fileslen;               /* length of files */
+    struct dict *metainfo;      /* reference to metainfo dict */
 };
 
 int initTnt(struct tnt **tnt, struct dict *metainfo);
+void die(struct tnt *t, int code);
 
 /* Peer discovery functions */
 void discoverPeers(struct eloop *eloop, struct tnt *tnt);
 void onPeers(int err, struct eloop *elooop, struct tnt *tnt);
 
 void onPeers(int err, struct eloop *elooop, struct tnt *tnt) {
+    if (err) {
+        logError(err, "Tracker request failed: %s", tnt->tracker.announce);
+        die(tnt, 1);
+    }
+}
+
+void onTrackerHttpGet(int err, 
+                      struct eloop *eloop, 
+                      char *url, 
+                      unsigned char *res, 
+                      int reslen,
+                      unsigned char *body,
+                      void *data) {
+    if (err) {
+        onPeers(err, eloop, data);
+        return;
+    }
+
+    /* decode response */
+    int x = 0;
+    struct node n;
+    int bodylen = reslen - (body - res);
+    struct bytes raw = {.vals = body, .len = bodylen, .cap = bodylen};
+    err = decode(&raw, &n, &x);
+    if (err) {
+        free(res);
+        onPeers(err, eloop, data);
+        return;
+    }
+    
+    dictFree(n.v.d);
+    free(res);
 }
 
 /**
@@ -537,9 +581,15 @@ void discoverPeers(struct eloop *eloop, struct tnt *tnt) {
     /* build URL */
 
     /* Calculate URL length. 10 is character length of INT_MAX and
-     * we have 3 integers. 6*2 is for '?', '&' and '=' characters.  */ 
-    int urllen = strlen(tracker->announce) + strlen(infohash) + strlen(peerid) + PORT_STRLEN + 10*3 + 6*2 + 1;
-    char url[urllen];
+     * we have 3 integers.  */ 
+    int urllen = strlen(tracker->announce) 
+        + strlen("?info_hash=") + strlen(infohash)
+        + strlen("&peer_id=") + strlen(peerid)
+        + strlen("&port=") + PORT_STRLEN
+        + strlen("&uploaded=") + 10
+        + strlen("&downloaded=") + 10
+        + strlen("&left=") + 10;
+    char url[urllen+1];
     snprintf(url, sizeof(url),
         "%s"
         "?info_hash=%s"
@@ -549,6 +599,8 @@ void discoverPeers(struct eloop *eloop, struct tnt *tnt) {
         "&downloaded=%d"
         "&left=%d",
         tracker->announce, infohash, peerid, port, uploaded, downloaded, left);
+
+    httpGet(eloop, url, onTrackerHttpGet, tnt);
 }
 
 /**
@@ -577,10 +629,35 @@ int genInfoHash(unsigned char infohash[20], struct dict *info) {
 }
 
 /**
+ * Generate a random 20 byte ID according to 
+ * https://www.bittorrent.org/beps/bep_0020.html
+ */
+void genPeerId(unsigned char id[20]) {
+    pid_t pid = getpid();
+    id[0] = '-'; 
+    id[1] = 'T';
+    id[2] = 'T'; 
+    id[3] = '0';
+    id[5] = '0'; 
+    id[6] = '1';
+    id[7] = '-';
+    /* chose printable ascii range.
+     * but we can choose anything between 0 to 256 */
+    int lower = 33;
+    int upper = 126; 
+    for (int i = 8; i < 19; i++) {
+        srand(pid+i-8);
+        id[i] = lower + (rand() % (upper - lower + 1));
+    }
+}
+
+/**
  * Creates an initiate int structure using torrent metainfo.
  * This function assumes metainfo is correct.
  */
 int initTnt(struct tnt **tnt, struct dict *metainfo) {
+    int err;
+
     *tnt = malloc(sizeof(struct tnt));
     if (!(*tnt)) return ERR_SYS;
     memset(*tnt, 0, sizeof(struct tnt));
@@ -600,7 +677,7 @@ int initTnt(struct tnt **tnt, struct dict *metainfo) {
     struct bytes *hashes = dictGet(info, "pieces")->v.s;
     int npieces = hashes->len / 20;
     t->pieces = malloc(sizeof(struct piece) * npieces);
-    if (t->pieces) {
+    if (!t->pieces) {
         free(t);
         return ERR_SYS;
     }
@@ -617,11 +694,67 @@ int initTnt(struct tnt **tnt, struct dict *metainfo) {
     t->ppos = 0;
 
     /* infohash */
+    err = genInfoHash(t->infohash, info);
+    if (err) {
+        free(t->pieces);
+        free(t);
+        return err;
+    }
+
     /* peerid */
+    genPeerId(t->peerid);
+
     /* files */
-    /* other */
+    if (dictGet(info, "files")) {
+        /* mutiple files */
+        struct list *l = dictGet(info, "files")->v.l;
+        struct file *files = malloc(sizeof(struct file) * l->len);
+        if (!files) {
+            free(t->pieces);
+            free(t);
+            return ERR_SYS;
+        }
+
+        for (int i = 0; i < l->len; i++) {
+            struct dict *d = l->vals[i].v.d;
+            files[i].len = dictGet(d, "length")->v.i;
+            files[i].path = dictGet(d, "path")->v.s->vals;
+            t->fileslen++;
+        }
+        t->files = files;
+    } else {
+        /* single file */
+        struct file *files = malloc(sizeof(struct file));
+        if (!files) {
+            free(t->pieces);
+            free(t);
+            return ERR_SYS;
+        }
+        files[0].len = dictGet(info, "length")->v.i;
+        files[0].path = dictGet(info, "name")->v.s->vals;
+        t->files = files;
+        t->fileslen = 1;
+    }
+
+    t->uploaded = 0;
+    t->downloaded = 0;
+    for (int i = 0; i < t->fileslen; i++)
+        t->left += t->files[i].len;
+    t->metainfo = metainfo;
 
     return OK;
+}
+
+/**
+ * Clean everything up and die.
+ */
+void die(struct tnt *t, int code) {
+    free(t->tracker.peers);
+    free(t->pieces);
+    free(t->files);
+    dictFree(t->metainfo);
+    free(t);
+    exit(code);
 }
 
 /**
@@ -664,18 +797,24 @@ int main(int argc, char **argv) {
 
     int err;
 
+    /* read torrent file */
     struct node node;
     const char *filename = argv[1];
     err = readTorrentFile(&node, filename);
 
+    /* initiate tnt structure from metainfo */
     struct dict *metainfo = node.v.d;
-    struct dict *info = dictGet(metainfo, "info")->v.d;
-    unsigned char infohash[20];
+    struct tnt *tnt;
+    err = initTnt(&tnt, metainfo);
 
-    genInfoHash(infohash, info);
-    for (int i = 0; i < 20; i++)
-        printf("%d", infohash[i]);
+    /* creates event loop */
+    struct eloop eloop;
+    memset(&eloop, 0, sizeof(struct eloop));
 
-    dictFree(node.v.d);
+    discoverPeers(&eloop, tnt);
+
+    eloopRun(&eloop);
+
+    die(tnt, 0);
     return 0;
 }
