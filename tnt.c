@@ -872,7 +872,31 @@ int readTorrentFile(struct node *n, const char *filename) {
  * a peer handshake but some peers won't send it. bitfield 
  * messages are not very efficient when a peer has small number
  * of pieces. Then instead of bitfield a series of have can be sent.
- * 
+ *
+ * REQUEST
+ * =======
+ * A file consist of many pieces but pieces can be further divide into
+ * blocks for easier downloads. request messages are for asking a specific
+ * block of a piece from another peer that we are interested in downloading. 
+ * We can request a block and wait for it to receive via a piece message. 
+ * Although, most torrent clients don't typically request a single block
+ * and wait for it to receive, they request multiple blocks at once
+ * by sending request messages one after another for more efficient
+ * data transfers. You can descide how much to request at once.
+ * I have heard 5 is optimal number to request at once.
+ *
+ * PIECE
+ * =====
+ * A piece message in BitTorrent is the response from a peer containing 
+ * the data you requested. It delivers the actual chunk of the file you 
+ * asked for.
+ *
+ * CANCEL
+ * ======
+ * cancel messages cancel the requests a peer sent using request 
+ * messages. cancel messages are useful for a scenario in BitTorrent
+ * called 'endgame'. 
+ * TODO: I will add a detailed description of the endgame it later.
  */
 
 #define CHOKE 0
