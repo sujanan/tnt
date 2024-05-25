@@ -911,6 +911,91 @@ int readTorrentFile(struct node *n, const char *filename) {
 
 /* p2p functions */
 
+/* encode messages */
+
+/* encode handshake */
+int encodeHandshake(unsigned char *buf, unsigned char *infohash, unsigned char *peerid);
+/* encode message - general function */
+int encodeMessage(unsigned char *buf, int head, int kind, unsigned char *payload, int payloadlen);
+/* encode different types of messages */
+int encodeChoke(unsigned char *buf); /* not yet implementated */
+int encodeUnchoke(unsigned char *buf); 
+int encodeInterested(unsigned char *buf);
+int encodeNotInterested(unsigned char *buf); /* not yet implementated */
+int encodeHave(unsigned char *buf, int index); /* not yet implementated */
+int encodeBitfield(unsigned char *buf, unsigned char *bitfiled, int len); /* not yet implementated */
+int encodeRequest(unsigned char *buf, int index, int begin, int blocksize);
+int encodePiece(unsigned char *buf, int index, int begin, unsigned char *piece, int piecelen); /* not yet implementated */
+int encodeCancel(unsigned char *buf, int index, int begin, int blocksize);
+
+/* decode messages */
+
+/* decode message head */
+void decodeHead(int *head, unsigned char *buf);
+/* decode message body - general function */
+void decodeBody(int *kind, unsigned char *payload, unsigned char *buf, int buflen);
+
+/* Encodes a handshake message. Returns the length. */
+int encodeHandshake(unsigned char *buf, unsigned char *infohash, unsigned char *peerid) {
+    unsigned char *s = buf;
+    s[0] = 19;
+    s += 1;
+    memcpy(s, "BitTorrent protocol", 19);
+    s += 19;
+    memset(s, 0, 8);
+    s += 8;
+    memcpy(s, infohash, 20);
+    s += 20;
+    memcpy(s, peerid, 20);
+    return 68;
+}
+
+/* Encodes a BitTorrent p2p message. Returns the length. */
+int encodeMessage(unsigned char *buf, int head, int kind, unsigned char *payload, int payloadlen) {
+    unsigned char *s = buf;
+    unsigned char h[4];
+    packi32(h, head);
+    memcpy(s, h, 4);
+    s += 4;
+    s[0] = kind;
+    s += 1;
+    if (payloadlen > 0)
+        memcpy(s, payload, payloadlen);
+    return 4 + 1 + payloadlen;
+}
+
+/* Encodes unchoke message. Returns the length. */
+int encodeUnchoke(unsigned char *buf) { return encodeMessage(buf, 1, UNCHOKE, NULL, 0); }
+
+/* Encodes interested message. Returns the length. */
+int encodeInterested(unsigned char *buf) { return encodeMessage(buf, 1, INTERESTED, NULL, 0); }
+
+/* Encodes interested message. Returns the length. */
+int encodeRequest(unsigned char *buf, int index, int begin, int blocksize) {
+    unsigned char s[12];
+    unsigned char in[4], be[4], bl[4];
+    packi32(in, index);
+    packi32(be, begin);
+    packi32(bl, blocksize);
+    memcpy(s+0, in, 4);
+    memcpy(s+4, be, 4);
+    memcpy(s+8, bl, 4);
+    return encodeMessage(buf, 1+12, REQUEST, s, 12);
+}
+
+/* Decode message head. */
+void decodeHead(int *head, unsigned char *buf) {
+    unsigned char h[4];
+    memcpy(h, buf, 4);
+    *head = unpacki32(h);
+}
+
+/* Decode message body. */
+void decodeBody(int *kind, unsigned char *payload, unsigned char *buf, int buflen) {
+    *kind = buf[0];
+    if (!payload) return;
+    memcpy(payload, buf, buflen);
+}
 
 /**
  * Start downloading/uploading pieces from discovered peers.

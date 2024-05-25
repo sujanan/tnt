@@ -20,6 +20,14 @@ void urlencode(char *dest, char *src, int len);
 int findFileSize(int *size, FILE *f);
 int readFile(unsigned char *buf, int bufcap, FILE *f);
 
+static void packi32(unsigned char s[4], int32_t i) {
+    s[0] = (i >> 24) & 0xFF; s[1] = (i >> 16) & 0xFF;
+    s[2] = (i >> 8)  & 0xFF; s[3] = (i)       & 0xFF;
+}
+static int32_t unpacki32(unsigned char s[4]) {
+    return (s[0] << 24) | (s[1] << 16) | (s[2] << 8) | s[3];
+}
+
 /* Types of errors */
 #define OK 0                /* no error */
 #define ERR_SYS 1           /* std error. errno is set */
