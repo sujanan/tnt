@@ -516,11 +516,47 @@ void die(struct tnt *t, int code);
 void discoverPeers(struct eloop *eloop, struct tnt *tnt);
 void onPeers(int err, struct eloop *elooop, struct tnt *tnt);
 
-void onPeers(int err, struct eloop *elooop, struct tnt *tnt) {
-    if (err) {
-        logError(err, "Tracker request failed: %s", tnt->tracker.announce);
-        die(tnt, 1);
+/**
+ * Extract peers from the decoded dictionary and fill
+ * the tnt structure.
+ */
+int addPeers(struct tnt *tnt, struct dict *res) {
+    struct tracker *tracker = &tnt->tracker; 
+    struct node *node = dictGet(res, "peers");
+    if (node->t == LIST) {
+        /* peers as a list */
+        struct list *peers = node->v.l;
+
+        tracker->peers = malloc(sizeof(struct peer) * peers->len);
+        if (!tracker->peers) return ERR_SYS;
+        for (int i = 0; i < peers->len; i++) {
+            struct dict *d = peers->vals[i].v.d;
+            struct peer *p = &tracker->peers[tracker->plen++];
+
+            /* ip */
+            strcpy(p->ip, dictGet(d, "ip")->v.s->vals);
+
+            /* port */
+            snprintf(p->port, sizeof(p->port), "%d", dictGet(d, "port")->v.i);
+
+            /* buf */
+            memset(p->buf, 0, sizeof(p->buf));
+            p->buflen = 0; 
+            p->bufcap = 0;
+
+            /* netdata */
+            memset(&p->netdata, 0, sizeof(p->netdata));
+
+            /* start as choked */
+            p->choked = 1;
+            p->fd = -1;
+            p->piece = NULL;
+        }
+    } else if (node->t == BYTES) {
+        /* peers as bytes. compact structure */
     }
+
+    return OK;
 }
 
 void onTrackerHttpGet(int err, 
@@ -537,18 +573,26 @@ void onTrackerHttpGet(int err,
 
     /* decode response */
     int x = 0;
-    struct node n;
+    struct node root = {.v.d = NULL};
     int bodylen = reslen - (body - res);
     struct bytes raw = {.vals = body, .len = bodylen, .cap = bodylen};
-    err = decode(&raw, &n, &x);
-    if (err) {
-        free(res);
-        onPeers(err, eloop, data);
-        return;
-    }
-    
-    dictFree(n.v.d);
+    err = decode(&raw, &root, &x);
+    if (err) goto error;
+
+    struct tnt *tnt = data;
+
+    /* add peers */
+    err = addPeers(tnt, root.v.d);
+    if (err) goto error;
+
+    onPeers(err, eloop, tnt);
+    dictFree(root.v.d);
     free(res);
+    return;
+error:
+    if (root.v.d) dictFree(root.v.d);
+    free(res);
+    onPeers(err, eloop, tnt);
 }
 
 /**
@@ -788,6 +832,72 @@ int readTorrentFile(struct node *n, const char *filename) {
     fclose(f);
     return OK;
 }
+
+/* message types in BitTorrent protocol */
+
+/* CHOKE/UNCHOKE 
+ * ============= 
+ * In BitTorrent protocol a peer can either choke another
+ * peer or unchoke another peer. If A chokes B, then A
+ * will not upload to B. Choking controls uploading/downloading 
+ * between peers. This is mainly done to give maximum download 
+ * speed to peers who are genuinely interested both uploading 
+ * and downloading. Peers that only download without uploading.
+ * (free riders) are more likely to be choked frequently.
+ * Keep in mind just because A has choked B, it doesn't mean
+ * A won't be receiving messages from B. It's more like
+ * "I won't answer any of your messages, but I might take them 
+ * into account". In our application, we  mostly focus about 
+ * downloading. So, we won't be choking other peers but might
+ * get choked and unchoked and will ask to get unchoked.
+ * (Please note that there is more to this story. Have look
+ * at the BitTorrent spec.)
+ *
+ * INTERESTED/NOT_INTERESTED
+ * =========================
+ * If a peer doesn't have all the pieces, then it is interested in
+ * downloading them. If a peer has all the pieces, then it has
+ * no interest in downloading them. The interest messages basically
+ * communiate this. It doesn't specifically request a piece, we
+ * have request messages for that but it indicate a general interest
+ * in downloading or not downloading. 
+ *
+ * HAVE/BITFIELD
+ * =============
+ * have and bitfield messages both serve the purpose of informing
+ * availibility of pieces to another peer. have messages are small
+ * and bitfield messages are large. bitfield message's payload
+ * is a bitfield with each index that peer has set to one and 
+ * the rest set to zero. bitfield is also the first message after
+ * a peer handshake but some peers won't send it. bitfield 
+ * messages are not very efficient when a peer has small number
+ * of pieces. Then instead of bitfield a series of have can be sent.
+ * 
+ */
+
+#define CHOKE 0
+#define UNCHOKE 1
+#define INTERESTED 2
+#define NOT_INTERESTED 3
+#define HAVE 4
+#define BITFIELD 5
+#define REQUEST 6
+#define PIECE 7
+#define CANCEL 8
+
+/* p2p functions */
+
+
+/**
+ * Start downloading/uploading pieces from discovered peers.
+ */
+void onPeers(int err, struct eloop *elooop, struct tnt *tnt) {
+    if (err) {
+        logError(err, "Tracker request failed: %s", tnt->tracker.announce);
+        die(tnt, 1);
+    }
+}
+
 
 int main(int argc, char **argv) {
     if (argc != 2) {
