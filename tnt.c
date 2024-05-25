@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <unistd.h>
+#include <stdarg.h>
 
 #include "util.h"
 
@@ -476,6 +477,7 @@ struct peer {
     int choked;               /* whether peer has choked us or not */
     int fd;                   /* socket descriptor */
     struct piece *piece;      /* piece peer currently downloading */
+    struct tnt *tnt;          /* reference to tnt structure */
 };
 
 /* Tracker keep track of peers of a Torrent. */
@@ -551,6 +553,8 @@ int addPeers(struct tnt *tnt, struct dict *res) {
             p->choked = 1;
             p->fd = -1;
             p->piece = NULL;
+            /* set tnt structure */
+            p->tnt = tnt;
         }
     } else if (node->t == BYTES) {
         /* peers as bytes. compact structure */
@@ -833,6 +837,24 @@ int readTorrentFile(struct node *n, const char *filename) {
     return OK;
 }
 
+/* Some helper functions for peers to log */
+void peerError(int err, struct peer *p, const char *fmt, ...) {
+    va_list ap;
+    char msg[1024];
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    logError(err, "[%15s]:%-5s %s", p->ip, p->port, msg);
+}
+void peerInfo(struct peer *p, const char *fmt, ...) {
+    va_list ap;
+    char msg[1024];
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    logInfo("[%15s]:%-5s %s", p->ip, p->port, msg);
+}
+
 /* message types in BitTorrent protocol */
 
 /* CHOKE/UNCHOKE 
@@ -935,6 +957,28 @@ void decodeHead(int *head, unsigned char *buf);
 /* decode message body - general function */
 void decodeBody(int *kind, unsigned char *payload, unsigned char *buf, int buflen);
 
+/* connect to peer */
+void onConnectPeer(int err, struct eloop *eloop, int fd, void *data);
+void connectPeer(struct eloop *eloop, struct peer *p);
+
+/* handshake */
+void sendHandshake(struct eloop *eloop, struct peer *p);
+void onSendHandshake(int err, struct eloop *eloop, int fd, void *data);
+void recvHandshake(struct eloop *eloop, struct peer *p);
+void onRecvHandshake(int err, struct eloop *eloop, int fd, void *data);
+
+/* send messages */
+void sendMessage(struct eloop *eloop, struct peer *p, int kind);
+void onSendUnchoke(int err, struct eloop *eloop, int fd, void *data);
+void onSendInterested(int err, struct eloop *eloop, int fd, void *data);
+void onSendRequest(int err, struct eloop *eloop, int fd, void *data);
+
+/* receive messages */
+void recvHead(struct eloop, struct peer *p);
+void onRecvHead(int err, struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data);
+void recvBody(struct eloop, struct peer *p);
+void onRecvBody(int err, struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data);
+
 /* Encodes a handshake message. Returns the length. */
 int encodeHandshake(unsigned char *buf, unsigned char *infohash, unsigned char *peerid) {
     unsigned char *s = buf;
@@ -997,13 +1041,39 @@ void decodeBody(int *kind, unsigned char *payload, unsigned char *buf, int bufle
     memcpy(payload, buf, buflen);
 }
 
+/* Connect to a peer */
+void onConnectPeer(int err, struct eloop *eloop, int fd, void *data) {
+    struct peer *p = data;
+    if (err) {
+        peerError(err, p, "Couldn't connect");
+        return;
+    }
+}
+void connectPeer(struct eloop *eloop, struct peer *p) {
+    int err;
+    struct addrinfo *info = NULL;
+    err = resolve(&info, p->ip, p->port, SOCK_STREAM);
+    if (err) {
+        peerError(err, p, "Couldn't connect: %s", gai_strerror(err));
+        return;
+    }
+    resetNetdata(&p->netdata);
+    netConnect(eloop, info, onConnectPeer, p, &p->netdata);
+}
+
 /**
  * Start downloading/uploading pieces from discovered peers.
  */
-void onPeers(int err, struct eloop *elooop, struct tnt *tnt) {
+void onPeers(int err, struct eloop *eloop, struct tnt *tnt) {
     if (err) {
         logError(err, "Tracker request failed: %s", tnt->tracker.announce);
         die(tnt, 1);
+    }
+    struct tracker *tracker = &tnt->tracker;
+    for (int i = 0; i < tracker->plen; i++) {
+        /* get next peer and connect to it */
+        struct peer *p = &tracker->peers[tracker->ppos++];
+        connectPeer(eloop, p);
     }
 }
 

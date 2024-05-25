@@ -23,9 +23,9 @@ static void tntLogVa(int lvl, const char *fmt, va_list ap) {
 
     char msg[1024];
     vsnprintf(msg, sizeof(msg), fmt, ap);
-    const char *s[] = {"D", "I", "E"};
+    const char *s[] = {"DEBUG", "INFO", "ERROR"};
     FILE *f = lvl == LOG_ERROR ? stderr : stdout;
-    fprintf(f, "%s | %s\n", s[lvl], msg);
+    fprintf(f, "%5s %s\n", s[lvl], msg);
 }
 
 static void tntLog(int lvl, const char *fmt, ...) {
@@ -324,6 +324,7 @@ int eloopProcess(struct eloop *eloop) {
              * It prioritizes the events added first */
             e = eloop->head;
         } else {
+            logInfo("%d", e->fd);
             e = e->next;
         }     
     }
