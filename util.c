@@ -48,9 +48,9 @@ void logError(int err, const char *fmt, ...) {
     va_end(ap);
 
     const char *errstr;
+    errstr = tnterrors[err];
     if (err == ERR_SYS && errno) 
         errstr = strerror(errno);
-    errstr = tnterrors[err];
 
     tntLog(LOG_ERROR, "%s: %s", msg, errstr);
 }
@@ -307,9 +307,9 @@ int eloopProcess(struct eloop *eloop) {
     /* start from head */
     e = eloop->head;
     while (e) {
-        if (e->mask & ELOOP_R && FD_ISSET(e->fd, &rfds) ||
-            e->mask & ELOOP_W && FD_ISSET(e->fd, &wfds) ||
-            e->mask & ELOOP_E && FD_ISSET(e->fd, &efds))
+        if ((e->mask & ELOOP_R) && FD_ISSET(e->fd, &rfds) ||
+            (e->mask & ELOOP_W) && FD_ISSET(e->fd, &wfds) ||
+            (e->mask & ELOOP_E) && FD_ISSET(e->fd, &efds))
         {
             /* execute registered callback */
             e->onevent(eloop, e->fd, e->data);
@@ -324,7 +324,6 @@ int eloopProcess(struct eloop *eloop) {
              * It prioritizes the events added first */
             e = eloop->head;
         } else {
-            logInfo("%d", e->fd);
             e = e->next;
         }     
     }
@@ -363,6 +362,14 @@ int resolve(struct addrinfo **info, char *host, char *port, int socktype) {
 static void onConnect(struct eloop *eloop, int fd, void *data) {
     struct netdata *netdata = (struct netdata *) data;
     onconnect *onconnect = netdata->fn;
+
+    int result;
+    socklen_t len = sizeof(result);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &result, &len) < 0) {
+        close(fd);
+        onconnect(ERR_SYS, eloop, -1, netdata->data);
+        return;
+    }
     onconnect(OK, eloop, fd, netdata->data);
 }
 
@@ -396,7 +403,7 @@ void netConnect(struct eloop *eloop,
             close(fd);
 
         /* add socket to the event loop and wait for it to connect */
-        r = eloopAdd(eloop, fd, ELOOP_W, onConnect, netdata);
+        r = eloopAdd(eloop, fd, ELOOP_W|ELOOP_R, onConnect, netdata);
         if (r)
             close(fd);
         return;
@@ -486,7 +493,7 @@ void netRecv(struct eloop *eloop,
     if (n == -1) {
         /* recv operation didn't complete immediately  */
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            err = eloopAdd(eloop, fd, ELOOP_R, onRecvReady, netdata);
+            err = eloopAdd(eloop, fd, ELOOP_R|ELOOP_W, onRecvReady, netdata);
             if (err) goto error;
         } else {
             err = ERR_SYS;

@@ -965,7 +965,7 @@ void connectPeer(struct eloop *eloop, struct peer *p);
 void sendHandshake(struct eloop *eloop, struct peer *p);
 void onSendHandshake(int err, struct eloop *eloop, int fd, void *data);
 void recvHandshake(struct eloop *eloop, struct peer *p);
-void onRecvHandshake(int err, struct eloop *eloop, int fd, void *data);
+void onRecvHandshake(int err, struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data);
 
 /* send messages */
 void sendMessage(struct eloop *eloop, struct peer *p, int kind);
@@ -1041,14 +1041,61 @@ void decodeBody(int *kind, unsigned char *payload, unsigned char *buf, int bufle
     memcpy(payload, buf, buflen);
 }
 
-/* Connect to a peer */
+/* On recvHandshake completes */
+void onRecvHandshake(int err, 
+                     struct eloop *eloop, 
+                     int fd, 
+                     unsigned char *buf, 
+                     int buflen, 
+                     void *data) {
+    struct peer *p = data;
+    if (err) {
+        peerError(err, p, "Handshake failed (recv)");
+        return;
+    }
+    peerInfo(p, "Handshaked");
+}
+
+/* Receive handshake from connected peer */
+void recvHandshake(struct eloop *eloop, struct peer *p) {
+    /* receive handshake */
+    resetNetdata(&p->netdata);
+    netRecv(eloop, p->fd, p->buf, 68, onRecvHandshake, p, &p->netdata); 
+}
+
+/* On sendHandshake completes */
+void onSendHandshake(int err, struct eloop *eloop, int fd, void *data) {
+    struct peer *p = data;
+    if (err) {
+        peerError(err, p, "Handshake failed (send)");
+        return;
+    }
+    recvHandshake(eloop, p);
+}
+
+/* Send handshake message to connected peer */
+void sendHandshake(struct eloop *eloop, struct peer *p) {
+    /* encode handshake */
+    int buflen = encodeHandshake(p->buf, p->tnt->infohash, p->tnt->peerid);
+    /* send handshake */
+    resetNetdata(&p->netdata);
+    netSend(eloop, p->fd, p->buf, buflen, onSendHandshake, p, &p->netdata);
+}
+
+/* On connectPeer completes */
 void onConnectPeer(int err, struct eloop *eloop, int fd, void *data) {
     struct peer *p = data;
     if (err) {
         peerError(err, p, "Couldn't connect");
         return;
     }
+    /* set connected socket fd */
+    p->fd = fd;
+    /* start handshake */ 
+    sendHandshake(eloop, p);
 }
+
+/* Connect to a peer */
 void connectPeer(struct eloop *eloop, struct peer *p) {
     int err;
     struct addrinfo *info = NULL;
@@ -1101,7 +1148,7 @@ int main(int argc, char **argv) {
     memset(&eloop, 0, sizeof(struct eloop));
 
     discoverPeers(&eloop, tnt);
-
+    
     eloopRun(&eloop);
 
     die(tnt, 0);
