@@ -952,6 +952,9 @@ int encodeCancel(unsigned char *buf, int index, int begin, int blocksize);
 
 /* decode messages */
 
+/* decode handshake */
+void decodeHandshake(int *pstrlen, 
+        char *pstr, unsigned char *infohash, unsigned char *peerid, unsigned char *buf);
 /* decode message head */
 void decodeHead(int *head, unsigned char *buf);
 /* decode message body - general function */
@@ -1027,6 +1030,23 @@ int encodeRequest(unsigned char *buf, int index, int begin, int blocksize) {
     return encodeMessage(buf, 1+12, REQUEST, s, 12);
 }
 
+/* Decode handshake. */
+void decodeHandshake(int *pstrlen, 
+                     char *pstr, 
+                     unsigned char *infohash, 
+                     unsigned char *peerid, 
+                     unsigned char *buf) {
+    unsigned char *s = buf;
+    *pstrlen = s[0];
+    s += 1;
+    memcpy(pstr, s, 19);
+    s += 19;
+    s += 8;
+    memcpy(infohash, s, 20);
+    s += 20;
+    memcpy(peerid, s, 20);
+}
+
 /* Decode message head. */
 void decodeHead(int *head, unsigned char *buf) {
     unsigned char h[4];
@@ -1051,6 +1071,15 @@ void onRecvHandshake(int err,
     struct peer *p = data;
     if (err) {
         peerError(err, p, "Handshake failed (recv)");
+        return;
+    }
+    int pstrlen = 0;
+    char pstr[20];
+    unsigned char infohash[20];
+    unsigned char peerid[20];
+    decodeHandshake(&pstrlen, pstr, infohash, peerid, p->buf);
+    if (pstrlen != 19 || strncmp(pstr, "BitTorrent protocol", 19) || strncmp(infohash, p->tnt->infohash, 20)) {
+        peerError(ERR_PROTO, p, "Handshake failed (invalid message)");
         return;
     }
     peerInfo(p, "Handshaked");

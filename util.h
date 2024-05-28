@@ -37,6 +37,7 @@ static int32_t unpacki32(unsigned char s[4]) {
 #define ERR_HTTP_FAILED 5   /* http request didn't given an OK response */
 #define ERR_BEN_ENC 6       /* bencode encoding failed */
 #define ERR_BEN_DEC 7       /* bencode decoding failed */
+#define ERR_PROTO 7         /* protocol error */
 
 /* Error strings for defined errors */
 static const char *tnterrors[] = {
@@ -47,7 +48,8 @@ static const char *tnterrors[] = {
     "Invalid HTTP URL",
     "HTTP request failed",
     "Bencode encoding failed",
-    "Bencode decoding failed"
+    "Bencode decoding failed",
+    "Protocol error"
 };
 
 
