@@ -492,6 +492,7 @@ struct tracker {
 struct file {
     char *path; /* file path along with name of the file */
     int len;    /* length of the file */
+    FILE *ptr;  /* opened pointer of the file */
 };
 
 /* tnt is our internal structure to keep track of everything we do.
@@ -508,6 +509,7 @@ struct tnt {
     int uploaded;               /* uploaded bytes */
     struct file *files;         /* downloading/uploading files */
     int fileslen;               /* length of files */
+    int piecelen;               /* given length of a piece. last piece might be shorter */
     struct dict *metainfo;      /* reference to metainfo dict */
 };
 
@@ -723,6 +725,8 @@ int initTnt(struct tnt **tnt, struct dict *metainfo) {
 
     /* pieces */
     struct bytes *hashes = dictGet(info, "pieces")->v.s;
+    int piecelen = dictGet(info, "piece length")->v.i;
+    t->piecelen = piecelen;
     int npieces = hashes->len / 20;
     t->pieces = malloc(sizeof(struct piece) * npieces);
     if (!t->pieces) {
@@ -737,6 +741,8 @@ int initTnt(struct tnt **tnt, struct dict *metainfo) {
         memcpy(p->hash, hashes->vals + i*20, 20);
         p->buf = NULL;
         p->buflen = 0;
+        /* TODO: last piece might be shorter */
+        p->len = piecelen;
     }
     t->plen = npieces;
     t->ppos = 0;
@@ -767,6 +773,7 @@ int initTnt(struct tnt **tnt, struct dict *metainfo) {
             struct dict *d = l->vals[i].v.d;
             files[i].len = dictGet(d, "length")->v.i;
             files[i].path = dictGet(d, "path")->v.s->vals;
+            files[i].ptr = NULL;
             t->fileslen++;
         }
         t->files = files;
@@ -780,6 +787,7 @@ int initTnt(struct tnt **tnt, struct dict *metainfo) {
         }
         files[0].len = dictGet(info, "length")->v.i;
         files[0].path = dictGet(info, "name")->v.s->vals;
+        files[0].ptr = NULL;
         t->files = files;
         t->fileslen = 1;
     }
@@ -959,6 +967,7 @@ void decodeHandshake(int *pstrlen,
 void decodeHead(int *head, unsigned char *buf);
 /* decode message body - general function */
 void decodeBody(int *kind, unsigned char *payload, unsigned char *buf, int buflen);
+void decodePiecePayload(int *index, int *begin, unsigned char *data, unsigned char *buf, int buflen);
 
 /* connect to peer */
 void onConnectPeer(int err, struct eloop *eloop, int fd, void *data);
@@ -971,15 +980,19 @@ void recvHandshake(struct eloop *eloop, struct peer *p);
 void onRecvHandshake(int err, struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data);
 
 /* send messages */
+void initDownload(struct eloop *eloop, struct peer *p);
+void download(struct eloop *eloop, struct peer *p);
+void rollback(struct eloop *eloop, struct peer *p);
 void sendMessage(struct eloop *eloop, struct peer *p, int kind);
 void onSendUnchoke(int err, struct eloop *eloop, int fd, void *data);
+void onSendHave(int err, struct eloop *eloop, int fd, void *data);
 void onSendInterested(int err, struct eloop *eloop, int fd, void *data);
 void onSendRequest(int err, struct eloop *eloop, int fd, void *data);
 
 /* receive messages */
-void recvHead(struct eloop, struct peer *p);
+void recvHead(struct eloop *eloop, struct peer *p);
 void onRecvHead(int err, struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data);
-void recvBody(struct eloop, struct peer *p);
+void recvBody(struct eloop *eloop, struct peer *p, int buflen);
 void onRecvBody(int err, struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data);
 
 /* Encodes a handshake message. Returns the length. */
@@ -1016,6 +1029,13 @@ int encodeUnchoke(unsigned char *buf) { return encodeMessage(buf, 1, UNCHOKE, NU
 
 /* Encodes interested message. Returns the length. */
 int encodeInterested(unsigned char *buf) { return encodeMessage(buf, 1, INTERESTED, NULL, 0); }
+
+/* Encodes have message. Returns the length. */
+int encodeHave(unsigned char *buf, int index) {
+    unsigned char s[4];
+    packi32(s, index);
+    return encodeMessage(buf, 1+4, HAVE, s, 4);
+}
 
 /* Encodes interested message. Returns the length. */
 int encodeRequest(unsigned char *buf, int index, int begin, int blocksize) {
@@ -1058,7 +1078,250 @@ void decodeHead(int *head, unsigned char *buf) {
 void decodeBody(int *kind, unsigned char *payload, unsigned char *buf, int buflen) {
     *kind = buf[0];
     if (!payload) return;
-    memcpy(payload, buf, buflen);
+    memcpy(payload, buf+1, buflen-1);
+}
+
+/* On body of a message receive */
+void onRecvBody(int err, struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data) {
+    struct peer *p = data;
+    if (err) {
+        peerError(err, p, "message recv failed (body)");
+        return;
+    }
+    int kind = 0;
+    unsigned char payload[buflen - 1]; /* buflen minus the kind byte */
+    decodeBody(&kind, payload, p->buf, buflen);
+    if (kind == CHOKE) {
+        p->choked = 1;
+    } else if (kind == UNCHOKE) {
+        p->choked = 0;
+    } else if (kind == INTERESTED) {
+        /* do nothing for now */
+    } else if (kind == NOT_INTERESTED) {
+        /* do nothing for now */
+    } else if (kind == HAVE) {
+        /* do nothing for now */
+    } else if (kind == BITFIELD) {
+        /* do nothing for now */
+    } else if (kind == REQUEST) {
+        /* do nothing for now */
+    } else if (kind == PIECE) {
+        unsigned char *s = payload;
+        unsigned char in[4], be[4];
+        memcpy(in, s, 4);
+        int index = unpacki32(in);
+        s += 4;
+        memcpy(be, s, 4);
+        int begin = unpacki32(be);
+        s += 4;
+        memcpy(p->piece->buf + begin, s, sizeof(payload) - 8);
+        p->piece->downloaded += sizeof(payload) - 8;
+    } else if (kind == CANCEL) {
+        /* do nothing for now */
+    } else {
+        /* do nothing for now */
+    }
+    /* call download again to continue the process */
+    download(eloop, p);
+}
+
+/* Receive body of a message */
+void recvBody(struct eloop *eloop, struct peer *p, int buflen) {
+    resetNetdata(&p->netdata);
+    netRecv(eloop, p->fd, p->buf, buflen, onRecvBody, p, &p->netdata);
+}
+
+/* On head of a message receive */
+void onRecvHead(int err, struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data) {
+    struct peer *p = data;
+    if (err) {
+        peerError(err, p, "message recv failed (head)");
+        return;
+    }
+    int head = 0;
+    decodeHead(&head, p->buf);
+    /* head is the length of the body we have to read next */
+    recvBody(eloop, p, head);
+}
+
+/* Receive head of a message */
+void recvHead(struct eloop *eloop, struct peer *p) {
+    resetNetdata(&p->netdata);
+    netRecv(eloop, p->fd, p->buf, 4, onRecvHead, p, &p->netdata);
+}
+
+void onSendRequest(int err, struct eloop *eloop, int fd, void *data) {
+    struct peer *p = data;
+    if (err) {
+        peerError(err, p, "message send failed (REQUEST)");
+        return;
+    }
+    /* last block could be shorter */
+    int blocksize = BLOCKSIZE;
+    if (p->piece->len - p->piece->requested < BLOCKSIZE)
+        blocksize = p->piece->len - p->piece->requested;
+    /* update the requested number of bytes */
+    p->piece->requested += blocksize;
+    /* call download again */
+    download(eloop, p);
+}
+
+/* On interested message sent */
+void onSendInterested(int err, struct eloop *eloop, int fd, void *data) {
+    struct peer *p = data;
+    if (err) {
+        peerError(err, p, "message send failed (INTERESTED)");
+        return;
+    }
+    initDownload(eloop, p);
+}
+
+/* On unchoke message sent */
+void onSendUnchoke(int err, struct eloop *eloop, int fd, void *data) {
+    struct peer *p = data;
+    if (err) {
+        peerError(err, p, "message send failed (UNCHOKE)");
+        return;
+    }
+    sendMessage(eloop, p, INTERESTED);
+}
+
+/* Sends a message of a given kind */
+void sendMessage(struct eloop *eloop, struct peer *p, int kind) {
+    if (kind == UNCHOKE) {
+        int buflen = encodeUnchoke(p->buf);
+        resetNetdata(&p->netdata);
+        netSend(eloop, p->fd, p->buf, buflen, onSendUnchoke, p, &p->netdata);
+    } else if (kind == INTERESTED) {
+        int buflen = encodeInterested(p->buf);
+        resetNetdata(&p->netdata);
+        netSend(eloop, p->fd, p->buf, buflen, onSendInterested, p, &p->netdata);
+    } else if (kind == REQUEST) {
+        /* last block could be shorter */
+        int blocksize = BLOCKSIZE;
+        if (p->piece->len - p->piece->requested < BLOCKSIZE)
+            blocksize = p->piece->len - p->piece->requested;
+        int buflen = encodeRequest(
+                p->buf, p->piece->index, p->piece->requested, blocksize);
+        resetNetdata(&p->netdata);
+        netSend(eloop, p->fd, p->buf, buflen, onSendRequest, p, &p->netdata);
+    }
+}
+
+/* Select next piece to download. Returns NULL if there are no more pieces. */
+struct piece *nextPiece(struct peer *p) {
+    /* there isn't any special strategy to pick 
+     * the next piece for the momemnt */
+    struct tnt *tnt = p->tnt; 
+    if (tnt->ppos < tnt->plen)
+        return &tnt->pieces[tnt->ppos++];
+    return NULL;
+}
+
+/* Initialize the download process */
+void initDownload(struct eloop *eloop, struct peer *p) {
+    p->piece = nextPiece(p);
+    if (p->piece) {
+        /* allocate piece length size of memory */
+        p->piece->buf = malloc(p->piece->len);
+        if (!p->piece->buf) {
+            peerError(ERR_SYS, p, "malloc failed");
+            return;
+        }
+        download(eloop, p);
+    }
+}
+
+/* Save piece to disk synchronously */
+int savePiece(struct tnt *tnt, struct piece *piece) {
+    /* find file based on piece location */
+    int curr = 0;
+    int index = 0;
+    for (int i = 0; i < tnt->fileslen; i++) {
+        int l = piece->index * tnt->piecelen;
+        if (l >= curr && l < curr + tnt->files[i].len) {
+            index = i;
+            break;
+        }
+        curr += tnt->files[i].len;
+    }
+
+    struct file *f = &tnt->files[index];
+    if (!f->ptr) {
+        /* open file if not opened yet */
+        f->ptr = fopen(f->path, "wb");
+        if (!f->ptr) return ERR_SYS;
+    }
+
+    /* seek to the piece location */
+    if (fseek(f->ptr, piece->index * tnt->piecelen - curr, SEEK_SET))
+        return ERR_SYS;
+
+    fwrite(piece->buf, 1, piece->len, f->ptr);
+    /* error occured after writing the file */
+    if (ferror(f->ptr)) return ERR_SYS;
+
+    return OK;
+}
+
+/* Download pieces block by block */
+void download(struct eloop *eloop, struct peer *p) {
+    int err;
+    if (p->choked) {
+        /* We're still choked. Wait until peer unchokes */
+        recvHead(eloop, p);
+    } else {
+        struct piece *piece = p->piece;
+        /* Here we're requesting the entire piece length (all the blocks)
+         * one after another and then start waiting for piece messages 
+         * (requested blocks) to receive. Ideally we should only request 
+         * a controlled number of blocks of a piece like this. Either way,
+         * reason protocol advise us to queue our request messages is to
+         * improve the TCP performance. This is called 'pipelining' */
+        if (piece->requested < piece->len) {
+            /* send request messages until we have requested all the blocks */
+            sendMessage(eloop, p, REQUEST);
+        } else if (piece->downloaded < piece->len) {
+            /* listen and download blocks */
+            recvHead(eloop, p);
+        } else {
+            peerInfo(p, "downloaded piece: %d", piece->index);
+
+            /* validate piece */
+            unsigned char hash[20];
+            sha1(piece->buf, piece->downloaded, hash);
+            if (memcmp(hash, piece->hash, 20)) {
+                peerError(ERR_PROTO, p, "piece integrity check failed: %d", piece->index);
+                return;
+            }
+
+            /* save piece to disk */
+            err = savePiece(p->tnt, piece);
+            if (err) {
+                peerError(err, p, "couldn't save piece: %d", piece->index);
+                return;
+            }
+            free(piece->buf);
+
+            /* get the next piece */
+            piece = nextPiece(p);
+            if (!piece) {
+                /* download completed */
+                return;
+            }
+            /* allocate piece length size of memory */
+            piece->buf = malloc(piece->len);
+            if (!piece->buf) {
+                peerError(ERR_SYS, p, "malloc failed");
+                return;
+            }
+            /* set the piece */
+            p->piece = piece;
+
+            /* continue the download process */
+            download(eloop, p);
+        }
+    }
 }
 
 /* On recvHandshake completes */
@@ -1077,12 +1340,18 @@ void onRecvHandshake(int err,
     char pstr[20];
     unsigned char infohash[20];
     unsigned char peerid[20];
+    /* decode handshake and verify */
     decodeHandshake(&pstrlen, pstr, infohash, peerid, p->buf);
-    if (pstrlen != 19 || strncmp(pstr, "BitTorrent protocol", 19) || strncmp(infohash, p->tnt->infohash, 20)) {
+    if (pstrlen != 19 || 
+            strncmp(pstr, "BitTorrent protocol", 19) || 
+            strncmp(infohash, p->tnt->infohash, 20)) {
         peerError(ERR_PROTO, p, "Handshake failed (invalid message)");
         return;
     }
     peerInfo(p, "Handshaked");
+
+    /* We have handshaked. Let's ask our peer to unchoke us. */
+    sendMessage(eloop, p, UNCHOKE);
 }
 
 /* Receive handshake from connected peer */

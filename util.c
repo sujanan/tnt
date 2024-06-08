@@ -214,7 +214,7 @@ int findFileSize(int *size, FILE *f) {
 }
 
 /**
- * Reads a file to the given buffer.
+ * Reads the entire file to the given buffer.
  * Make sure buffer has enough space.
  */
 int readFile(unsigned char *buf, int bufcap, FILE *f) {
@@ -291,15 +291,19 @@ int eloopProcess(struct eloop *eloop) {
     int maxfd = 0;
     /* add fd to sets based on the mask */
     while (e) {
-        if (e->fd & ELOOP_R) FD_SET(e->fd, &rfds);
-        if (e->fd & ELOOP_W) FD_SET(e->fd, &wfds);
-        if (e->fd & ELOOP_E) FD_SET(e->fd, &efds);
+        if (e->mask & ELOOP_R) FD_SET(e->fd, &rfds);
+        if (e->mask & ELOOP_W) FD_SET(e->fd, &wfds);
+        if (e->mask & ELOOP_E) FD_SET(e->fd, &efds);
         /* keep track of maxfd */
         if (e->fd > maxfd) maxfd = e->fd;
         e = e->next;
     }
 
-    r = select(maxfd+1, &rfds, &wfds, &efds, NULL);
+    struct timeval timeout;
+    timeout.tv_sec = 40;
+    timeout.tv_usec = 0;
+
+    r = select(maxfd+1, &rfds, &wfds, &efds, &timeout);
     /* error occured */
     if (r == -1) return ERR_SYS;
     /* nothing to process */
@@ -325,7 +329,7 @@ int eloopProcess(struct eloop *eloop) {
             e = eloop->head;
         } else {
             e = e->next;
-        }     
+        } 
     }
 
     return OK;
@@ -403,7 +407,7 @@ void netConnect(struct eloop *eloop,
             close(fd);
 
         /* add socket to the event loop and wait for it to connect */
-        r = eloopAdd(eloop, fd, ELOOP_W|ELOOP_R, onConnect, netdata);
+        r = eloopAdd(eloop, fd, ELOOP_W, onConnect, netdata);
         if (r)
             close(fd);
         return;
@@ -449,11 +453,8 @@ void netSend(struct eloop *eloop,
             goto error;
         }
     } else if (n < netdata->buflen) {
-        netdata->buflen -= n;
-        netdata->buf += n;
-
         /* there is more to send */
-        netSend(eloop, fd, buf, buflen, onsend, data, netdata);
+        netSend(eloop, fd, buf + n, buflen - n, onsend, data, netdata);
     } else {
         /* we sent everything */
         onsend(OK, eloop, fd, netdata->data);
@@ -493,7 +494,7 @@ void netRecv(struct eloop *eloop,
     if (n == -1) {
         /* recv operation didn't complete immediately  */
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            err = eloopAdd(eloop, fd, ELOOP_R|ELOOP_W, onRecvReady, netdata);
+            err = eloopAdd(eloop, fd, ELOOP_R, onRecvReady, netdata);
             if (err) goto error;
         } else {
             err = ERR_SYS;
@@ -503,7 +504,7 @@ void netRecv(struct eloop *eloop,
         /* socket has been closed */
         err = ERR_SOCK_CLOSED;
         goto error;
-    } else if (n < netdata->bufcap) {
+    } else if (n + netdata->buflen < netdata->bufcap) {
         netdata->buflen += n;
 
         /* there is more to recv */
