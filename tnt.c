@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <stdarg.h>
+#include <time.h>
 
 #include "util.h"
 
@@ -438,6 +439,10 @@ int decode(struct bytes *raw, struct node *n, int *x) {
 /* Peer to peer port */
 #define P2P_PORT "6881"
 
+#define INTIIALIZED 1
+#define DOWNLOADING 2
+#define DOWNLOADED 3
+
 /* Piece is a fixed-size chunk of the overall file. */
 struct piece {
     int index;              /* piece index */
@@ -451,6 +456,7 @@ struct piece {
     unsigned char *buf; 
 
     int buflen;         /* current length of the buffer */
+    int state;          /* current state of the piece */
 };
 
 /* Peer is a participant of the file sharing process.
@@ -478,6 +484,7 @@ struct peer {
     int fd;                   /* socket descriptor */
     struct piece *piece;      /* piece peer currently downloading */
     struct tnt *tnt;          /* reference to tnt structure */
+    int idle;                 /* peer has completed work given to it */
 };
 
 /* Tracker keep track of peers of a Torrent. */
@@ -520,6 +527,16 @@ void die(struct tnt *t, int code);
 void discoverPeers(struct eloop *eloop, struct tnt *tnt);
 void onPeers(int err, struct eloop *elooop, struct tnt *tnt);
 
+void resetPiece(struct piece *piece) {
+    if (piece->buf)
+        free(piece->buf);
+    piece->buf = NULL;
+    piece->buflen = 0;
+    piece->requested = 0;
+    piece->downloaded = 0;
+    piece->state = INTIIALIZED;
+}
+
 /**
  * Extract peers from the decoded dictionary and fill
  * the tnt structure.
@@ -557,6 +574,7 @@ int addPeers(struct tnt *tnt, struct dict *res) {
             p->piece = NULL;
             /* set tnt structure */
             p->tnt = tnt;
+            p->idle = 0;
         }
     } else if (node->t == BYTES) {
         /* peers as bytes. compact structure */
@@ -743,9 +761,10 @@ int initTnt(struct tnt **tnt, struct dict *metainfo) {
         p->buflen = 0;
         /* TODO: last piece might be shorter */
         p->len = piecelen;
+        p->state = INTIIALIZED;
     }
     t->plen = npieces;
-    t->ppos = 0;
+    t->ppos = npieces - 1;
 
     /* infohash */
     err = genInfoHash(t->infohash, info);
@@ -852,7 +871,7 @@ void peerError(int err, struct peer *p, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
-    logError(err, "[%15s]:%-5s %s", p->ip, p->port, msg);
+    logError(err, "[%15s]:%-5s %s: %d", p->ip, p->port, msg);
 }
 void peerInfo(struct peer *p, const char *fmt, ...) {
     va_list ap;
@@ -1081,11 +1100,52 @@ void decodeBody(int *kind, unsigned char *payload, unsigned char *buf, int bufle
     memcpy(payload, buf+1, buflen-1);
 }
 
+/* Select next piece to download. Returns NULL if there are no more pieces. */
+struct piece *nextPiece(struct peer *p) {
+    struct tnt *tnt = p->tnt; 
+    struct piece *piece; 
+    for (int i = 0; i < tnt->plen; i++) {
+        piece = &tnt->pieces[tnt->ppos];
+        tnt->ppos = (tnt->ppos+1) % tnt->plen;
+        if (piece->state == INTIIALIZED) {
+            piece->state = DOWNLOADING;
+            return piece;
+        }
+    }
+    return NULL;
+}
+
+void changePeer(struct eloop *eloop, struct peer *p) {
+    struct tracker *tracker = &p->tnt->tracker;
+    for (int i = 0; i < tracker->plen; i++) {
+        if (tracker->peers[i].idle) {
+            struct peer *newp = &tracker->peers[i];
+            newp->piece = p->piece;
+            newp->piece->state = DOWNLOADING;
+            peerInfo(p, "handed over downloading piece %d to [%s]:%s", 
+                    newp->piece->index, new->ip, new->port);
+            newp->piece->buf = malloc(newp->piece->len);
+            if (newp->piece->buf == NULL) {
+                logError(ERR_SYS, "malloc failed");
+                return;
+            }
+            download(eloop, newp);
+            return;
+        }
+    }
+    peerInfo("attempted to hand over piece %d but all peers were busy", p->piece->index);
+}
+
 /* On body of a message receive */
 void onRecvBody(int err, struct eloop *eloop, int fd, unsigned char *buf, int buflen, void *data) {
     struct peer *p = data;
     if (err) {
         peerError(err, p, "message recv failed (body)");
+        if (p->piece) {
+            p->idle = 0;
+            resetPiece(p->piece);
+            changePeer(eloop, p);
+        }
         return;
     }
     int kind = 0;
@@ -1136,6 +1196,11 @@ void onRecvHead(int err, struct eloop *eloop, int fd, unsigned char *buf, int bu
     struct peer *p = data;
     if (err) {
         peerError(err, p, "message recv failed (head)");
+        if (p->piece) {
+            p->idle = 0;
+            resetPiece(p->piece);
+            changePeer(eloop, p);
+        }
         return;
     }
     int head = 0;
@@ -1154,6 +1219,11 @@ void onSendRequest(int err, struct eloop *eloop, int fd, void *data) {
     struct peer *p = data;
     if (err) {
         peerError(err, p, "message send failed (REQUEST)");
+        if (p->piece) {
+            p->idle = 0;
+            resetPiece(p->piece);
+            changePeer(eloop, p);
+        }
         return;
     }
     /* last block could be shorter */
@@ -1206,16 +1276,6 @@ void sendMessage(struct eloop *eloop, struct peer *p, int kind) {
         resetNetdata(&p->netdata);
         netSend(eloop, p->fd, p->buf, buflen, onSendRequest, p, &p->netdata);
     }
-}
-
-/* Select next piece to download. Returns NULL if there are no more pieces. */
-struct piece *nextPiece(struct peer *p) {
-    /* there isn't any special strategy to pick 
-     * the next piece for the momemnt */
-    struct tnt *tnt = p->tnt; 
-    if (tnt->ppos < tnt->plen)
-        return &tnt->pieces[tnt->ppos++];
-    return NULL;
 }
 
 /* Initialize the download process */
@@ -1302,13 +1362,18 @@ void download(struct eloop *eloop, struct peer *p) {
                 return;
             }
             free(piece->buf);
+            piece->buf = NULL;
+            piece->state = DOWNLOADED;
 
             /* get the next piece */
             piece = nextPiece(p);
             if (!piece) {
-                /* download completed */
+                p->idle = 1;
+                p->buflen = 0;
+                p->bufcap = 0;
                 return;
             }
+
             /* allocate piece length size of memory */
             piece->buf = malloc(piece->len);
             if (!piece->buf) {

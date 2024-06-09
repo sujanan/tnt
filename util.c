@@ -300,7 +300,7 @@ int eloopProcess(struct eloop *eloop) {
     }
 
     struct timeval timeout;
-    timeout.tv_sec = 40;
+    timeout.tv_sec = 2;
     timeout.tv_usec = 0;
 
     r = select(maxfd+1, &rfds, &wfds, &efds, &timeout);
