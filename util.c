@@ -173,7 +173,7 @@ void sha1(unsigned char *data, size_t len, unsigned char digest[20]) {
  * Implementation of URL encoding.
  * Make sure dest is at least 3 times larger than src.
  */
-void urlencode(char *dest, char *src, int len) {
+void urlencode(char *dest, unsigned char *src, int len) {
     char *hex = "0123456789ABCDEF";
     int i = 0, j = 0;
 
@@ -543,7 +543,7 @@ static void onHttpGetRecv(int err,
     /* copy tcp buffer to http response buffer */
     memcpy(httpdata->res + httpdata->reslen, buf, buflen);
     httpdata->reslen += buflen;
-    unsigned char *res = httpdata->res;
+    char *res = (char *) httpdata->res;
     int reslen = httpdata->reslen;
 
     /* response is not OK */
@@ -599,7 +599,7 @@ static void onHttpGetRecv(int err,
     } else {
         /* response is complete */
         httpdata->onhttp(OK, eloop, httpdata->url, 
-                httpdata->res, httpdata->reslen, body, httpdata->data);
+                httpdata->res, httpdata->reslen, (unsigned char *) body, httpdata->data);
         close(fd);
         freeHttpdata(httpdata);
     }
@@ -608,7 +608,7 @@ static void onHttpGetRecv(int err,
 error:
     close(fd);
     httpdata->onhttp(err, eloop, httpdata->url, 
-            httpdata->res, httpdata->reslen, body, httpdata->data);
+            httpdata->res, httpdata->reslen, (unsigned char *) body, httpdata->data);
     freeHttpdata(httpdata);
 }
 
@@ -762,7 +762,7 @@ void httpGet(struct eloop *eloop, char *url, onhttp *onhttp, void *data) {
 
     memset(httpdata, 0, sizeof(*httpdata));
     httpdata->url = url;
-    httpdata->req = req;
+    httpdata->req = (unsigned char *) req;
     httpdata->reqlen = reqlen;
     httpdata->onhttp = onhttp;
     httpdata->data = data;

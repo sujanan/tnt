@@ -16,7 +16,7 @@
 
 /* General utility functions */ 
 void sha1(unsigned char *data, size_t len, unsigned char digest[20]);
-void urlencode(char *dest, char *src, int len);
+void urlencode(char *dest, unsigned char *src, int len);
 int findFileSize(int *size, FILE *f);
 int readFile(unsigned char *buf, int bufcap, FILE *f);
 

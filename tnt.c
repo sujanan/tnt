@@ -439,9 +439,9 @@ int decode(struct bytes *raw, struct node *n, int *x) {
 /* Peer to peer port */
 #define P2P_PORT "6881"
 
-#define INTIIALIZED 1
-#define DOWNLOADING 2
-#define DOWNLOADED 3
+#define INTIIALIZED 1 /* piece is initialized */
+#define DOWNLOADING 2 /* downloading the piece */
+#define DOWNLOADED 3  /* piece has successfully downloaded */
 
 /* Piece is a fixed-size chunk of the overall file. */
 struct piece {
@@ -599,7 +599,7 @@ void onTrackerHttpGet(int err,
     int x = 0;
     struct node root = {.v.d = NULL};
     int bodylen = reslen - (body - res);
-    struct bytes raw = {.vals = body, .len = bodylen, .cap = bodylen};
+    struct bytes raw = {.vals = (char *) body, .len = bodylen, .cap = bodylen};
     err = decode(&raw, &root, &x);
     if (err) goto error;
 
@@ -686,12 +686,12 @@ int genInfoHash(unsigned char infohash[20], struct dict *info) {
 
     struct node n = {.v.d = info, .t = DICT};
     unsigned char vals[info->nbytes];
-    struct bytes buf = {.vals = vals, .len = 0, .cap = sizeof(vals)};
+    struct bytes buf = {.vals = (char *) vals, .len = 0, .cap = sizeof(vals)};
 
     err = encode(&buf, &n);
     if (err) return err;
 
-    sha1(buf.vals, buf.len, infohash);
+    sha1((unsigned char *) buf.vals, buf.len, infohash);
 
     return OK;
 }
@@ -856,7 +856,7 @@ int readTorrentFile(struct node *n, const char *filename) {
 
     /* decode */
     int x = 0;
-    struct bytes raw = {.vals = buf, .len = size, .cap = size};
+    struct bytes raw = {.vals = (char *) buf, .len = size, .cap = size};
     err = decode(&raw, n, &x);
     if (err) return err;
 
@@ -871,7 +871,7 @@ void peerError(int err, struct peer *p, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
-    logError(err, "[%15s]:%-5s %s: %d", p->ip, p->port, msg);
+    logError(err, "[%15s]:%-5s %s", p->ip, p->port, msg);
 }
 void peerInfo(struct peer *p, const char *fmt, ...) {
     va_list ap;
@@ -1123,7 +1123,7 @@ void changePeer(struct eloop *eloop, struct peer *p) {
             newp->piece = p->piece;
             newp->piece->state = DOWNLOADING;
             peerInfo(p, "handed over downloading piece %d to [%s]:%s", 
-                    newp->piece->index, new->ip, new->port);
+                    newp->piece->index, newp->ip, newp->port);
             newp->piece->buf = malloc(newp->piece->len);
             if (newp->piece->buf == NULL) {
                 logError(ERR_SYS, "malloc failed");
@@ -1133,7 +1133,7 @@ void changePeer(struct eloop *eloop, struct peer *p) {
             return;
         }
     }
-    peerInfo("attempted to hand over piece %d but all peers were busy", p->piece->index);
+    peerInfo(p, "attempted to hand over piece %d but all peers were busy", p->piece->index);
 }
 
 /* On body of a message receive */
@@ -1409,7 +1409,7 @@ void onRecvHandshake(int err,
     decodeHandshake(&pstrlen, pstr, infohash, peerid, p->buf);
     if (pstrlen != 19 || 
             strncmp(pstr, "BitTorrent protocol", 19) || 
-            strncmp(infohash, p->tnt->infohash, 20)) {
+            memcmp(infohash, p->tnt->infohash, 20)) {
         peerError(ERR_PROTO, p, "Handshake failed (invalid message)");
         return;
     }
@@ -1486,7 +1486,6 @@ void onPeers(int err, struct eloop *eloop, struct tnt *tnt) {
         connectPeer(eloop, p);
     }
 }
-
 
 int main(int argc, char **argv) {
     if (argc != 2) {
