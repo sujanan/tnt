@@ -1345,8 +1345,6 @@ void download(struct eloop *eloop, struct peer *p) {
             /* listen and download blocks */
             recvHead(eloop, p);
         } else {
-            peerInfo(p, "downloaded piece: %d", piece->index);
-
             /* validate piece */
             unsigned char hash[20];
             sha1(piece->buf, piece->downloaded, hash);
@@ -1361,13 +1359,22 @@ void download(struct eloop *eloop, struct peer *p) {
                 peerError(err, p, "couldn't save piece: %d", piece->index);
                 return;
             }
+            p->tnt->downloaded += piece->len;
+            p->tnt->left -= piece->len;
             free(piece->buf);
             piece->buf = NULL;
             piece->state = DOWNLOADED;
 
+            peerInfo(p, "↓ %5.2f%% #%d", 
+                    (double) p->tnt->downloaded / (p->tnt->piecelen * p->tnt->plen) * 100,
+                    piece->index);
+
             /* get the next piece */
             piece = nextPiece(p);
             if (!piece) {
+                /* peer has completed pieces assigned to it.
+                 * It goes to idle now. So it is available to
+                 * download failed pieces. */
                 p->idle = 1;
                 p->buflen = 0;
                 p->bufcap = 0;
