@@ -8,6 +8,9 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
+#define STR_(v) #v
+#define STR(v) STR_(v)
+
 /* Maximum possible character length of an ipv4 or ipv6 address. */
 #define IP_STRLEN 40
 
@@ -20,12 +23,43 @@ void urlencode(char *dest, unsigned char *src, int len);
 int findFileSize(int *size, FILE *f);
 int readFile(unsigned char *buf, int bufcap, FILE *f);
 
+static void packi16(unsigned char s[2], int16_t i) {
+    s[0] = (i >> 8) & 0xFF; s[1] = (i) & 0xFF;
+}
+static int16_t unpacki16(unsigned char s[2]) {
+    return (s[0] << 8) | s[1];
+}
+static void packu16(unsigned char s[2], uint16_t i) {
+    s[0] = (i >> 8) & 0xFF; s[1] = (i) & 0xFF;
+}
+static uint16_t unpacku16(unsigned char s[2]) {
+    return (s[0] << 8) | s[1];
+}
 static void packi32(unsigned char s[4], int32_t i) {
     s[0] = (i >> 24) & 0xFF; s[1] = (i >> 16) & 0xFF;
     s[2] = (i >> 8)  & 0xFF; s[3] = (i)       & 0xFF;
 }
 static int32_t unpacki32(unsigned char s[4]) {
     return (s[0] << 24) | (s[1] << 16) | (s[2] << 8) | s[3];
+}
+static void packu32(unsigned char s[4], uint32_t i) {
+    s[0] = (i >> 24) & 0xFF; s[1] = (i >> 16) & 0xFF;
+    s[2] = (i >> 8)  & 0xFF; s[3] = (i)       & 0xFF;
+}
+static uint32_t unpacku32(unsigned char s[4]) {
+    return (s[0] << 24) | (s[1] << 16) | (s[2] << 8) | s[3];
+}
+static void packi64(unsigned char s[8], int64_t i) {
+    s[0] = (i >> 56) & 0xFF; s[1] = (i >> 48) & 0xFF;
+    s[2] = (i >> 40) & 0xFF; s[3] = (i >> 32) & 0xFF;
+    s[4] = (i >> 24) & 0xFF; s[5] = (i >> 16) & 0xFF;
+    s[6] = (i >> 8)  & 0xFF; s[7] = (i)       & 0xFF;
+}
+static int64_t unpacki64(unsigned char s[8]) {
+    return ((int64_t) s[0] << 56) | ((int64_t) s[1] << 48) | 
+           ((int64_t) s[2] << 40) | ((int64_t) s[3] << 32) |
+           ((int64_t) s[4] << 24) | ((int64_t) s[5] << 16) | 
+           ((int64_t) s[6] << 8)  | ((int64_t) s[7]);
 }
 
 /* Types of errors */
@@ -38,6 +72,7 @@ static int32_t unpacki32(unsigned char s[4]) {
 #define ERR_BEN_ENC 6       /* bencode encoding failed */
 #define ERR_BEN_DEC 7       /* bencode decoding failed */
 #define ERR_PROTO 8         /* protocol error */
+#define ERR_NOT_IMPL 9      /* not yet implementated */
 
 /* Error strings for defined errors */
 static const char *tnterrors[] = {
@@ -49,7 +84,8 @@ static const char *tnterrors[] = {
     "HTTP request failed",
     "Bencode encoding failed",
     "Bencode decoding failed",
-    "Protocol error"
+    "Protocol error",
+    "Not yet implementated"
 };
 
 

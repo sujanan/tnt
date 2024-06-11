@@ -5,16 +5,17 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <time.h>
+#include <arpa/inet.h>
 
 #include "util.h"
 #include "ben.h"
 
 /* Maximum number of bytes to be requested (REQUEST) at once 
  * when downloading a piece. */
-#define BLOCKSIZE 16384
+#define BLOCKSIZE 1384
 
 /* Peer to peer port */
-#define P2P_PORT "6881"
+#define P2P_PORT 6881
 
 #define INTIIALIZED 1 /* piece is initialized */
 #define DOWNLOADING 2 /* downloading the piece */
@@ -64,12 +65,28 @@ struct peer {
     int idle;                 /* peer has completed work given to it */
 };
 
+/* tracker action types */
+#define CONNECT 0  
+#define ANNOUNCE 1
+
 /* Tracker keep track of peers of a Torrent. */
 struct tracker {
     char *announce;     /* tracker URL */
     struct peer *peers; /* peers */ 
     int plen;           /* peers length */ 
     int ppos;           /* current position of peers */
+    
+    /* A buffer for udp to handle udp tracker requests and responses. */
+    unsigned char buf[8192];
+    int buflen;         /* buffer length. Send data upto buflen */
+    int bufcap;         /* buffer capacity. Receive data upto bufcap */
+
+    /* A netdata to use when exchanging messages. */
+    struct netdata netdata;
+
+    int32_t transid;    /* transaction ID */
+    int64_t connid;     /* connection ID */
+    int32_t action;     /* action type */
 };
 
 /* Infomation about a downloading/uploading file */
@@ -97,16 +114,9 @@ struct tnt {
     struct dict *metainfo;      /* reference to metainfo dict */
 };
 
-int initTnt(struct tnt **tnt, struct dict *metainfo);
-void die(struct tnt *t, int code);
-
-/* Peer discovery functions */
-void discoverPeers(struct eloop *eloop, struct tnt *tnt);
-void onPeers(int err, struct eloop *elooop, struct tnt *tnt);
-
+/* Reset piece */
 void resetPiece(struct piece *piece) {
-    if (piece->buf)
-        free(piece->buf);
+    free(piece->buf);
     piece->buf = NULL;
     piece->buflen = 0;
     piece->requested = 0;
@@ -114,59 +124,391 @@ void resetPiece(struct piece *piece) {
     piece->state = INTIIALIZED;
 }
 
-/**
- * Extract peers from the decoded dictionary and fill
- * the tnt structure.
- */
-int addPeers(struct tnt *tnt, struct dict *res) {
-    struct tracker *tracker = &tnt->tracker; 
-    struct node *node = dictGet(res, "peers");
-    if (node->t == LIST) {
-        /* peers as a list */
-        struct list *peers = node->v.l;
-
-        tracker->peers = malloc(sizeof(struct peer) * peers->len);
-        if (!tracker->peers) return ERR_SYS;
-        for (int i = 0; i < peers->len; i++) {
-            struct dict *d = peers->vals[i].v.d;
-            struct peer *p = &tracker->peers[tracker->plen++];
-
-            /* ip */
-            strcpy(p->ip, dictGet(d, "ip")->v.s->vals);
-
-            /* port */
-            snprintf(p->port, sizeof(p->port), "%d", dictGet(d, "port")->v.i);
-
-            /* buf */
-            memset(p->buf, 0, sizeof(p->buf));
-            p->buflen = 0; 
-            p->bufcap = 0;
-
-            /* netdata */
-            memset(&p->netdata, 0, sizeof(p->netdata));
-
-            /* start as choked */
-            p->choked = 1;
-            p->fd = -1;
-            p->piece = NULL;
-            /* set tnt structure */
-            p->tnt = tnt;
-            p->idle = 0;
-        }
-    } else if (node->t == BYTES) {
-        /* peers as bytes. compact structure */
-    }
-
-    return OK;
+/* Initialize peer */
+void initPeer(struct peer *p, char *ip, int port, struct tnt *tnt) {
+     strcpy(p->ip, ip);
+     snprintf(p->port, sizeof(p->port), "%d", port);
+     memset(p->buf, 0, sizeof(p->buf));
+     p->buflen = 0; 
+     p->bufcap = 0;
+     memset(&p->netdata, 0, sizeof(p->netdata));
+     p->choked = 1;
+     p->fd = -1;
+     p->piece = NULL;
+     p->tnt = tnt;
+     p->idle = 0;
 }
 
-void onTrackerHttpGet(int err, 
-                      struct eloop *eloop, 
-                      char *url, 
-                      unsigned char *res, 
-                      int reslen,
-                      unsigned char *body,
-                      void *data) {
+int initTnt(struct tnt **tnt, struct dict *metainfo);
+void die(struct tnt *t, int code);
+
+/* Peer discovery functions */
+void onPeers(int err, struct eloop *elooop, struct tnt *tnt);
+void discoverPeers(struct eloop *eloop, struct tnt *tnt);
+
+/* http tracker functions */
+void httpDiscoverPeers(struct eloop *eloop, struct tnt *tnt);
+void httpOnTrackerHttpGet(int err, struct eloop *eloop, 
+        char *url, unsigned char *res, int reslen, unsigned char *body, void *data);
+
+/* udp tracker functions */
+void udpDiscoverPeers(struct eloop *eloop, struct tnt *tnt);
+void udpTrackerRecv(struct eloop *eloop, int fd, struct tnt *tnt);
+void udpOnTrackerSend(int err, struct eloop *eloop, int fd, void *data);
+void udpOnTrackerConnect(int err, struct eloop *eloop, int fd, void *data);
+void udpTrackerSend(struct eloop *eloop, int fd, struct tnt *tnt);
+void udpDiscoverPeers(struct eloop *eloop, struct tnt *tnt);
+
+int encodeTrackerConnect(unsigned char *buf, int64_t protoid, int32_t action, int32_t transid) {
+    unsigned char *s = buf;
+    unsigned char pr[8];
+    unsigned char ac[4];
+    unsigned char tr[4];
+    packi64(pr, protoid);
+    memcpy(s, pr, 8);
+    s += 8;
+    packi32(ac, action);
+    memcpy(s, ac, 4);
+    s += 4;
+    packi32(tr, transid);
+    memcpy(s, tr, 4);
+    return 8 + 4 + 4;
+}
+
+int encodeTrackerAnnounce(unsigned char *buf, 
+                          int64_t connid, 
+                          int32_t action, 
+                          int32_t transid,
+                          unsigned char infohash[20],
+                          unsigned char peerid[20],
+                          int64_t downloaded,
+                          int64_t left,
+                          int64_t uploaded,
+                          int32_t event,
+                          int32_t ip,
+                          int32_t key,
+                          int32_t num_what,
+                          int16_t port) {
+    unsigned char *s = buf;
+    unsigned char connidstr[8], actionstr[4], transidstr[4], leftstr[8], 
+                  downloadedstr[8], uploadedstr[8], eventstr[4], 
+                  ipstr[4], keystr[4], num_whatstr[4], portstr[2];
+    packi64(connidstr, connid);
+    memcpy(s, connidstr, 8);
+    s += 8;
+    packi32(actionstr, action);
+    memcpy(s, actionstr, 4);
+    s += 4;
+    packi32(transidstr, transid);
+    memcpy(s, transidstr, 4);
+    s += 4;
+    memcpy(s, infohash, 20);
+    s += 20;
+    memcpy(s, peerid, 20);
+    s += 20;
+    packi64(downloadedstr, downloaded);
+    memcpy(s, downloadedstr, 8);
+    s += 8;
+    packi64(leftstr, left);
+    memcpy(s, leftstr, 8);
+    s += 8;
+    packi64(uploadedstr, uploaded);
+    memcpy(s, uploadedstr, 8);
+    s += 8;
+    packi32(eventstr, event);
+    memcpy(s, eventstr, 4);
+    s += 4;
+    packi32(ipstr, ip);
+    memcpy(s, ipstr, 4);
+    s += 4;
+    packi32(keystr, key);
+    memcpy(s, keystr, 4);
+    s += 4;
+    packi32(num_whatstr, num_what);
+    memcpy(s, num_whatstr, 4);
+    s += 4;
+    packi16(portstr, port);
+    memcpy(s, portstr, 2);
+    return 98;
+}
+
+void decodeTrackerAnnounceHead(int32_t *action,
+                               int32_t *transid,
+                               int32_t *interval,
+                               int32_t *leechers,
+                               int32_t *seeders,
+                               unsigned char *buf) {
+    unsigned char *s = buf;
+    unsigned char ac[4];
+    unsigned char tr[4];
+    unsigned char in[4];
+    unsigned char le[4];
+    unsigned char se[4];
+    memcpy(ac, s, 4);
+    *action = unpacki32(ac);
+    s += 4;
+    memcpy(tr, s, 4);
+    *transid = unpacki32(tr);
+    s += 4;
+    memcpy(in, s, 4);
+    *interval = unpacki32(in);
+    s += 4;
+    memcpy(le, s, 4);
+    *leechers = unpacki32(le);
+    s += 4;
+    memcpy(se, s, 4);
+    *seeders = unpacki32(se);
+}
+
+void decodeTrackerAnnounceBody(struct peer *peers,
+                               unsigned char *buf,
+                               int buflen) {
+    int j = 0;
+    for (int i = 0; i < buflen; i += 6) {
+    }
+}
+
+void decodeTrackerConnect(int32_t *action, int32_t *transid, int64_t *connid, unsigned char *buf) {
+    unsigned char *s = buf;
+    unsigned char ac[4];
+    unsigned char tr[4];
+    unsigned char co[8];
+    memcpy(ac, s, 4);
+    *action = unpacki32(ac);
+    s += 4;
+    memcpy(tr, s, 4);
+    *transid = unpacki32(tr);
+    s += 4;
+    memcpy(co, s, 8);
+    *connid = unpacki64(co);
+}
+
+void udpOnTrackerRecvAnnounce(int err, 
+                              struct eloop *eloop, 
+                              int fd, 
+                              unsigned char *buf, 
+                              int buflen, 
+                              void *data) {
+    struct tnt *tnt = data;
+    struct tracker *tracker = &tnt->tracker;
+    if (err) goto error;
+
+    int32_t action;
+    int32_t transid;
+    int32_t interval;
+    int32_t leechers;
+    int32_t seeders;
+    decodeTrackerAnnounceHead(&action, &transid, &interval, &leechers, &seeders, buf);
+
+    if (action != tracker->action || transid != tracker->transid) {
+        err = ERR_PROTO;
+        goto error;
+    }
+
+    int npeers = leechers + seeders;
+    int bodylen = npeers * 6;
+    
+    if (buflen == 20) {
+        tracker->action = ANNOUNCE;
+        tracker->bufcap = 20 + bodylen;
+        udpTrackerSend(eloop, fd, tnt);
+    } else {
+        tracker->peers = malloc(sizeof(struct peer) * npeers);
+        if (!tracker->peers) {
+            err = ERR_SYS;
+            goto error;
+        }
+        unsigned char *s = buf + 20;
+        for (int i = 0; i < npeers; i++) {
+            struct peer *p = &tracker->peers[tracker->plen];
+
+            unsigned char ipstr[4];
+            unsigned char portstr[4];
+            memcpy(ipstr, s, 4);
+            s += 4;
+            memcpy(portstr, s, 2);
+            s += 2;
+            uint32_t ip = htonl(unpacku32(ipstr));
+            uint16_t port = unpacku16(portstr);
+
+            char ipv4[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &ip, ipv4, INET_ADDRSTRLEN);
+
+            initPeer(p, ipv4, port, tnt);
+            tracker->plen++;
+        }
+        onPeers(OK, eloop, tnt);
+    }
+
+    return;
+error:
+    onPeers(err, eloop, tnt);
+}
+
+void udpOnTrackerRecvConnect(int err, 
+                             struct eloop *eloop, 
+                             int fd, 
+                             unsigned char *buf, 
+                             int buflen, 
+                             void *data) {
+    struct tnt *tnt = data;
+    struct tracker *tracker = &tnt->tracker;
+    if (err) goto error;
+
+    int32_t action;
+    int32_t transid;
+    int64_t connid;
+    decodeTrackerConnect(&action, &transid, &connid, tracker->buf);
+
+    if (action != tracker->action || transid != tracker->transid) {
+        err = ERR_PROTO;
+        goto error;
+    }
+    tracker->action = ANNOUNCE;
+    tracker->connid = connid;
+    tracker->bufcap = 20;
+    udpTrackerSend(eloop, fd, tnt);
+
+    return;
+error:
+    onPeers(err, eloop, tnt);
+}
+
+void udpTrackerRecv(struct eloop *eloop, int fd, struct tnt *tnt) {
+    struct tracker *tracker = &tnt->tracker;
+
+    if (tracker->action == CONNECT) {
+        resetNetdata(&tracker->netdata);
+        netRecv(eloop, fd, tracker->buf, 
+                tracker->bufcap, udpOnTrackerRecvConnect, tnt, &tracker->netdata); 
+    } else if (tracker->action == ANNOUNCE) {
+        resetNetdata(&tracker->netdata);
+        netRecv(eloop, fd, tracker->buf, 
+                tracker->bufcap, udpOnTrackerRecvAnnounce, tnt, &tracker->netdata); 
+    }
+}
+
+void udpOnTrackerSend(int err, struct eloop *eloop, int fd, void *data) {
+    struct tnt *tnt = data;
+    struct tracker *tracker = &tnt->tracker;
+    if (err) goto error;
+
+    udpTrackerRecv(eloop, fd, tnt);
+
+    return;
+error:
+    onPeers(err, eloop, tnt);
+}
+
+void udpTrackerSend(struct eloop *eloop, int fd, struct tnt *tnt) {
+    struct tracker *tracker = &tnt->tracker;
+
+    if (tracker->action == CONNECT) {
+        resetNetdata(&tracker->netdata);
+        tracker->buflen = encodeTrackerConnect(tracker->buf,
+                0x41727101980, tracker->action, tracker->transid);
+        netSend(eloop, fd, 
+                tracker->buf, tracker->buflen, udpOnTrackerSend, tnt, &tracker->netdata);
+    } else if (tracker->action == ANNOUNCE) {
+        resetNetdata(&tracker->netdata);
+        tracker->buflen = encodeTrackerAnnounce(
+            tracker->buf,
+            tracker->connid, 
+            tracker->action,
+            tracker->transid,
+            tnt->infohash,
+            tnt->peerid,
+            tnt->downloaded,
+            tnt->left,
+            tnt->uploaded,
+            2,                /* event */
+            0,                /* ip */
+            0,                /* key */
+            -1,               /* num_what */
+            P2P_PORT);        /* port */
+        netSend(eloop, fd, 
+                tracker->buf, tracker->buflen, udpOnTrackerSend, tnt, &tracker->netdata);
+    }
+}
+
+void udpOnTrackerConnect(int err, struct eloop *eloop, int fd, void *data) {
+    struct tnt *tnt = data;
+    struct tracker *tracker = &tnt->tracker;
+    if (err) goto error;
+
+    time(NULL);
+    tracker->transid = rand();
+    tracker->action = CONNECT;
+    tracker->bufcap = 16;
+    udpTrackerSend(eloop, fd, tnt);
+    return;
+error:
+    onPeers(err, eloop, tnt);
+}
+
+/**
+ * Discover peers based if the announce URL is udp.
+ */
+void udpDiscoverPeers(struct eloop *eloop, struct tnt *tnt) {
+    int err;
+    struct tracker *tracker = &tnt->tracker;
+    char *r, *s = tracker->announce;
+    char *hoststr, *portstr;
+    int hostlen, portlen;
+    hoststr = portstr = NULL;
+    hostlen = portlen = 0;
+
+    r = strstr(s, "://");
+    if (r && strlen(r + 3) > 0) {
+        s = r + 3;
+        hoststr = s;
+        hostlen = strlen(s);
+    }    
+    r = strstr(s, ":");
+    if (r && strlen(r + 1) > 0) {
+        if (s == hoststr) hostlen = r - s;
+        s = r + 1;
+        portstr = s;
+        portlen = strlen(s);
+    }
+    r = strstr(s, "/");
+    if (r && strlen(r + 1) > 0) {
+        if (s == hoststr) hostlen = r - s;
+        if (s == portstr) portlen = r - s;
+    }
+    char host[hostlen+1];
+    char port[portlen+1];
+    memset(host, 0, sizeof(host));
+    memset(port, 0, sizeof(port));
+    strncpy(host, hoststr, hostlen);
+    strncpy(port, portstr, portlen);
+
+    struct addrinfo *info = NULL;
+    err = resolve(&info, host, port, SOCK_DGRAM);
+    if (err) {
+        err = ERR_GAI;
+        goto error;
+    }
+
+    /* initiate UDP connection */
+    resetNetdata(&tracker->netdata);
+    netConnect(eloop, info, udpOnTrackerConnect, tnt, &tracker->netdata);
+
+    freeaddrinfo(info);
+    return;
+
+error:
+    freeaddrinfo(info);
+    onPeers(err, eloop, tnt);
+}
+
+void httpOnTrackerHttpGet(int err, 
+                          struct eloop *eloop, 
+                          char *url, 
+                          unsigned char *res, 
+                          int reslen,
+                          unsigned char *body,
+                          void *data) {
     if (err) {
         onPeers(err, eloop, data);
         return;
@@ -181,10 +523,27 @@ void onTrackerHttpGet(int err,
     if (err) goto error;
 
     struct tnt *tnt = data;
+    struct tracker *tracker = &tnt->tracker; 
 
     /* add peers */
-    err = addPeers(tnt, root.v.d);
-    if (err) goto error;
+    struct node *node = dictGet(root.v.d, "peers");
+    if (node->t == LIST) {
+        /* peers as a list */
+        struct list *peers = node->v.l;
+
+        tracker->peers = malloc(sizeof(struct peer) * peers->len);
+        if (!tracker->peers) {
+            err = ERR_SYS;
+            goto error;
+        }
+        for (int i = 0; i < peers->len; i++) {
+            struct dict *d = peers->vals[i].v.d;
+            struct peer *p = &tracker->peers[tracker->plen++];
+            initPeer(p, dictGet(d, "ip")->v.s->vals, dictGet(d, "port")->v.i, tnt);
+        }
+    } else if (node->t == BYTES) {
+        /* TODO: peers as bytes. compact structure */
+    }
 
     onPeers(err, eloop, tnt);
     dictFree(root.v.d);
@@ -197,28 +556,17 @@ error:
 }
 
 /**
- * Discover peers based on the announce field in tnt.tracker. 
- * It fills the peers field in tracker. Only supports HTTP. 
- * Upon success or failure, onPeers function will get called. 
- * Note that discoverPeers is only called once in our program. 
- * If we wish to call it periodically, we can add it as a time event 
- * in the event loop. Right now we don't have the ability to do time events.
+ * Discover peers based if the announce URL is http.
  */
-void discoverPeers(struct eloop *eloop, struct tnt *tnt) {
+void httpDiscoverPeers(struct eloop *eloop, struct tnt *tnt) {
     struct tracker *tracker = &tnt->tracker;
-
-    /* protocol is not HTTP */
-    if (strncmp(tracker->announce, "http://", 7)) {
-        onPeers(ERR_HTTP_URL, eloop, tnt);
-        return;  
-    }
 
     /* params */
     char infohash[20*3+1];
     char peerid[20*3+1];
     urlencode(infohash, tnt->infohash, 20);
     urlencode(peerid, tnt->peerid, 20);
-    char *port = P2P_PORT;
+    char *port = STR(P2P_PORT);
     int uploaded = tnt->uploaded;
     int downloaded = tnt->downloaded;
     int left = tnt->left;
@@ -245,7 +593,24 @@ void discoverPeers(struct eloop *eloop, struct tnt *tnt) {
         "&left=%d",
         tracker->announce, infohash, peerid, port, uploaded, downloaded, left);
 
-    httpGet(eloop, url, onTrackerHttpGet, tnt);
+    httpGet(eloop, url, httpOnTrackerHttpGet, tnt);
+}
+
+/**
+ * Discover peers based on the announce field in tnt.tracker. 
+ * It fills the peers field in tracker. Upon success or failure, 
+ * onPeers function will get called. Note that discoverPeers is 
+ * only called once in our program. 
+ */
+void discoverPeers(struct eloop *eloop, struct tnt *tnt) {
+    struct tracker *tracker = &tnt->tracker;
+    if (!strncmp(tracker->announce, "http://", 7)) {
+        httpDiscoverPeers(eloop, tnt);
+    } else if (!strncmp(tracker->announce, "udp://", 6)) {
+        udpDiscoverPeers(eloop, tnt);
+    } else {
+        onPeers(ERR_NOT_IMPL, eloop, tnt);
+    }
 }
 
 /**
@@ -341,7 +706,7 @@ int initTnt(struct tnt **tnt, struct dict *metainfo) {
         p->state = INTIIALIZED;
     }
     t->plen = npieces;
-    t->ppos = npieces - 1;
+    t->ppos = 0;
 
     /* infohash */
     err = genInfoHash(t->infohash, info);
@@ -579,7 +944,9 @@ void onRecvHandshake(int err, struct eloop *eloop, int fd, unsigned char *buf, i
 void initDownload(struct eloop *eloop, struct peer *p);
 void download(struct eloop *eloop, struct peer *p);
 void rollback(struct eloop *eloop, struct peer *p);
+void sendKeeAlive(struct eloop *eloop, struct peer *p);
 void sendMessage(struct eloop *eloop, struct peer *p, int kind);
+void onSendKeepAlive(int err, struct eloop *eloop, int fd, void *data);
 void onSendUnchoke(int err, struct eloop *eloop, int fd, void *data);
 void onSendHave(int err, struct eloop *eloop, int fd, void *data);
 void onSendInterested(int err, struct eloop *eloop, int fd, void *data);
@@ -833,6 +1200,26 @@ void onSendUnchoke(int err, struct eloop *eloop, int fd, void *data) {
     sendMessage(eloop, p, INTERESTED);
 }
 
+/* On keep-alive message sent */
+void onSendKeepAlive(int err, struct eloop *eloop, int fd, void *data) {
+    struct peer *p = data;
+    if (err) {
+        peerError(err, p, "message send failed (keep-alive)");
+        return;
+    }
+    peerInfo(p, "keep-alive");
+    p->buflen = 0;
+    p->bufcap = 0;
+}
+
+/* Send keep-alive message */
+void sendKeeAlive(struct eloop *eloop, struct peer *p) {
+    int buflen = 4;
+    p->buf[0] = 0;
+    resetNetdata(&p->netdata);
+    netSend(eloop, p->fd, p->buf, buflen, onSendKeepAlive, p, &p->netdata);
+}
+
 /* Sends a message of a given kind */
 void sendMessage(struct eloop *eloop, struct peer *p, int kind) {
     if (kind == UNCHOKE) {
@@ -953,8 +1340,7 @@ void download(struct eloop *eloop, struct peer *p) {
                  * It goes to idle now. So it is available to
                  * download failed pieces. */
                 p->idle = 1;
-                p->buflen = 0;
-                p->bufcap = 0;
+                sendKeeAlive(eloop, p);
                 return;
             }
 
@@ -1048,7 +1434,7 @@ void connectPeer(struct eloop *eloop, struct peer *p) {
     struct addrinfo *info = NULL;
     err = resolve(&info, p->ip, p->port, SOCK_STREAM);
     if (err) {
-        peerError(err, p, "Couldn't connect: %s", gai_strerror(err));
+        peerError(ERR_GAI, p, "Couldn't connect: %s", gai_strerror(err));
         return;
     }
     resetNetdata(&p->netdata);

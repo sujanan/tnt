@@ -238,7 +238,7 @@ int encode(struct bytes *raw, struct node *n) {
         for (int i = 0; i < len; i++) 
             raw->vals[raw->len++] = s[i];
         raw->vals[raw->len++] = ':';
-        assert(raw->len+n->v.s->len < raw->cap);
+        assert(raw->len + n->v.s->len < raw->cap);
         for (int i = 0; i < n->v.s->len; i++) 
             raw->vals[raw->len++] = n->v.s->vals[i];
     } else {
