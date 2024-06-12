@@ -159,6 +159,7 @@ void udpOnTrackerConnect(int err, struct eloop *eloop, int fd, void *data);
 void udpTrackerSend(struct eloop *eloop, int fd, struct tnt *tnt);
 void udpDiscoverPeers(struct eloop *eloop, struct tnt *tnt);
 
+/* Encodes tracker (udp) CONNECT request */
 int encodeTrackerConnect(unsigned char *buf, int64_t protoid, int32_t action, int32_t transid) {
     unsigned char *s = buf;
     unsigned char pr[8];
@@ -175,6 +176,7 @@ int encodeTrackerConnect(unsigned char *buf, int64_t protoid, int32_t action, in
     return 8 + 4 + 4;
 }
 
+/* Encodes tracker (udp) ANNOUNCE request */
 int encodeTrackerAnnounce(unsigned char *buf, 
                           int64_t connid, 
                           int32_t action, 
@@ -232,6 +234,7 @@ int encodeTrackerAnnounce(unsigned char *buf,
     return 98;
 }
 
+/* Decodes tracker (udp) ANNOUNCE response head */
 void decodeTrackerAnnounceHead(int32_t *action,
                                int32_t *transid,
                                int32_t *interval,
@@ -260,14 +263,7 @@ void decodeTrackerAnnounceHead(int32_t *action,
     *seeders = unpacki32(se);
 }
 
-void decodeTrackerAnnounceBody(struct peer *peers,
-                               unsigned char *buf,
-                               int buflen) {
-    int j = 0;
-    for (int i = 0; i < buflen; i += 6) {
-    }
-}
-
+/* Decodes tracker (udp) CONNECT response */
 void decodeTrackerConnect(int32_t *action, int32_t *transid, int64_t *connid, unsigned char *buf) {
     unsigned char *s = buf;
     unsigned char ac[4];
@@ -283,6 +279,7 @@ void decodeTrackerConnect(int32_t *action, int32_t *transid, int64_t *connid, un
     *connid = unpacki64(co);
 }
 
+/* On tracker udp ANNOUNCE response receive */
 void udpOnTrackerRecvAnnounce(int err, 
                               struct eloop *eloop, 
                               int fd, 
@@ -306,13 +303,15 @@ void udpOnTrackerRecvAnnounce(int err,
     }
 
     int npeers = leechers + seeders;
-    int bodylen = npeers * 6;
+    int bodylen = npeers * 6; /* assuming we're requesting ipv4 */
     
     if (buflen == 20) {
+        /* buflen is 20 means, it is the first ANNOUNCE response */
         tracker->action = ANNOUNCE;
         tracker->bufcap = 20 + bodylen;
         udpTrackerSend(eloop, fd, tnt);
     } else {
+        /* full response is here */
         tracker->peers = malloc(sizeof(struct peer) * npeers);
         if (!tracker->peers) {
             err = ERR_SYS;
@@ -328,9 +327,10 @@ void udpOnTrackerRecvAnnounce(int err,
             s += 4;
             memcpy(portstr, s, 2);
             s += 2;
-            uint32_t ip = htonl(unpacku32(ipstr));
             uint16_t port = unpacku16(portstr);
 
+            /* convert 32 bit unsigned ipv4 address to string */
+            uint32_t ip = htonl(unpacku32(ipstr));
             char ipv4[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &ip, ipv4, INET_ADDRSTRLEN);
 
@@ -345,6 +345,7 @@ error:
     onPeers(err, eloop, tnt);
 }
 
+/* On tracker udp CONNECT response receive */
 void udpOnTrackerRecvConnect(int err, 
                              struct eloop *eloop, 
                              int fd, 
@@ -366,6 +367,10 @@ void udpOnTrackerRecvConnect(int err,
     }
     tracker->action = ANNOUNCE;
     tracker->connid = connid;
+    /* bufcap is set 20 for just to obtain a ANNOUNCE
+     * response without peers. Once we have the leechers
+     * and seeders count, we'll request again with the
+     * calculated bufcap. 20 + (seeders + leechers) * 6 */
     tracker->bufcap = 20;
     udpTrackerSend(eloop, fd, tnt);
 
@@ -374,6 +379,7 @@ error:
     onPeers(err, eloop, tnt);
 }
 
+/* Receive data from a udp tracker */
 void udpTrackerRecv(struct eloop *eloop, int fd, struct tnt *tnt) {
     struct tracker *tracker = &tnt->tracker;
 
@@ -388,6 +394,7 @@ void udpTrackerRecv(struct eloop *eloop, int fd, struct tnt *tnt) {
     }
 }
 
+/* On udp tracker request complete */
 void udpOnTrackerSend(int err, struct eloop *eloop, int fd, void *data) {
     struct tnt *tnt = data;
     struct tracker *tracker = &tnt->tracker;
@@ -400,6 +407,7 @@ error:
     onPeers(err, eloop, tnt);
 }
 
+/* Send data to a udp tracker */
 void udpTrackerSend(struct eloop *eloop, int fd, struct tnt *tnt) {
     struct tracker *tracker = &tnt->tracker;
 
@@ -421,16 +429,17 @@ void udpTrackerSend(struct eloop *eloop, int fd, struct tnt *tnt) {
             tnt->downloaded,
             tnt->left,
             tnt->uploaded,
-            2,                /* event */
-            0,                /* ip */
+            0,                /* event - started */
+            0,                /* ip - default */
             0,                /* key */
-            -1,               /* num_what */
+            -1,               /* num_what -default */
             P2P_PORT);        /* port */
         netSend(eloop, fd, 
                 tracker->buf, tracker->buflen, udpOnTrackerSend, tnt, &tracker->netdata);
     }
 }
 
+/* On connecting to udp tracker */
 void udpOnTrackerConnect(int err, struct eloop *eloop, int fd, void *data) {
     struct tnt *tnt = data;
     struct tracker *tracker = &tnt->tracker;
@@ -439,7 +448,7 @@ void udpOnTrackerConnect(int err, struct eloop *eloop, int fd, void *data) {
     time(NULL);
     tracker->transid = rand();
     tracker->action = CONNECT;
-    tracker->bufcap = 16;
+    tracker->bufcap = 16; /* CONNECT response size */
     udpTrackerSend(eloop, fd, tnt);
     return;
 error:
